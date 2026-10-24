@@ -35,6 +35,9 @@ dedup_threshold    = 0.94  # cosine >= this (same type) => treated as near-dupli
 decay_per_reflect  = 0.0   # >0 slowly lowers confidence of stale, unlinked memories
 decay_min_age_days = 30    # decay-eligible only if neither updated nor recalled
                            # within this many days (recalled memories never fade)
+contradiction_band = [0.70, 0.94]  # reflect reports same-type memories sharing an
+                                   # entity in this cosine band as candidate
+                                   # contradictions (never auto-resolved)
 
 [writers]
 # Who may write, and how much they are trusted. Tokens are NEVER stored here:

@@ -61,6 +61,9 @@ class Config:
     decay_per_reflect: float = 0.0    # confidence decay for stale, unlinked memories
     decay_min_age_days: int = 30      # a memory is decay-eligible only if it was
                                       # neither updated NOR recalled in this window
+    contradiction_low: float = 0.70   # reflect flags same-type memories that share an
+    contradiction_high: float = 0.94  # entity and sit in this cosine band (related,
+                                      # not duplicates) as candidate contradictions
 
     # identity
     writer: str = "owner"             # writer id for local (stdio/CLI) use;
@@ -132,6 +135,8 @@ def load_config(root: Optional[str] = None) -> Config:
     cfg.dedup_threshold = float(con.get("dedup_threshold", cfg.dedup_threshold))
     cfg.decay_per_reflect = float(con.get("decay_per_reflect", cfg.decay_per_reflect))
     cfg.decay_min_age_days = int(con.get("decay_min_age_days", cfg.decay_min_age_days))
+    band = con.get("contradiction_band", [cfg.contradiction_low, cfg.contradiction_high])
+    cfg.contradiction_low, cfg.contradiction_high = float(band[0]), float(band[1])
 
     if "writers" in data:
         cfg.writers = _parse_writers(data["writers"])

@@ -21,6 +21,13 @@ reflect pass).
 Similarity is computed in row blocks rather than one n x n matrix, so memory
 use stays flat as the store grows into the tens of thousands.
 
+It also *surfaces* (never resolves) candidate contradictions: memories of
+the same type that share an entity and are similar enough to be about the
+same thing but not similar enough to be duplicates (cosine in the
+contradiction band, default 0.70-0.94), with no relation between them yet.
+They land in `ReflectReport.contested` for a librarian or the owner to
+resolve: supersede one, or record an explicit `contradicts` relation.
+
 LLM-assisted merging (actually rewriting two memories into one better one) is
 the natural next layer: the agent calls `recall`, sees a duplicate cluster in
 the report, composes a merged memory, and writes it back with `memory_update`
@@ -48,6 +55,7 @@ class ReflectReport:
     duplicate_clusters: List[List[str]] = field(default_factory=list)
     reinforced: List[str] = field(default_factory=list)
     decayed: List[str] = field(default_factory=list)
+    contested: List[Dict[str, object]] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
     def to_json(self) -> Dict[str, object]:
@@ -55,6 +63,7 @@ class ReflectReport:
             "duplicate_clusters": self.duplicate_clusters,
             "reinforced": self.reinforced,
             "decayed": self.decayed,
+            "contested": self.contested,
             "notes": self.notes,
         }
 
@@ -108,7 +117,8 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
             decay: float = 0.0,
             decay_min_age_days: int = 30,
             dry_run: bool = False,
-            persist: Optional[Persist] = None) -> ReflectReport:
+            persist: Optional[Persist] = None,
+            contradiction_band: Tuple[float, float] = (0.70, 0.94)) -> ReflectReport:
     report = ReflectReport()
     if persist is None:
         def persist(mem: Memory) -> None:
@@ -207,6 +217,9 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
                     persist(m)
                     report.reinforced.append(mid)
 
+    report.contested = _contradiction_candidates(
+        store, index, ids, matrix, meta, contradiction_band)
+
     # optional decay — access-gated: only stale (neither updated nor recalled
     # within decay_min_age_days), unlinked memories lose confidence. Memories
     # the agent actually uses are left alone no matter how old they are.
@@ -224,3 +237,54 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
                 report.decayed.append(ids[i])
 
     return report
+
+
+def _shareable(ring_a: str, ring_b: str) -> bool:
+    """Contradictions are compared within one ring, or between shared rings
+    (canon / team:*). Proposals are not truth yet, and comparing someone's
+    private notebook with another ring would leak it to the reviewer."""
+    if "proposed" in (ring_a, ring_b):
+        return False
+    if ring_a == ring_b:
+        return True
+    shared = lambda r: r == "canon" or r.startswith("team:")
+    return shared(ring_a) and shared(ring_b)
+
+
+def _contradiction_candidates(store: MarkdownStore, index: MemoryIndex,
+                              ids: List[str], matrix: np.ndarray,
+                              meta: Dict[str, Tuple[str, float, str, str]],
+                              band: Tuple[float, float]) -> List[Dict[str, object]]:
+    lo, hi = band
+    related = set()
+    for src, _rel, dst, _ring in index.relation_edges():
+        related.add(frozenset((src, dst)))
+    out: List[Dict[str, object]] = []
+    mems: Dict[str, Optional[Memory]] = {}
+
+    def get(mid: str) -> Optional[Memory]:
+        if mid not in mems:
+            mems[mid] = store.read_by_id(mid)
+        return mems[mid]
+
+    for i, j, sim in _pairs_above(matrix, lo):
+        if sim >= hi:
+            continue  # duplicates are dedup's business
+        a_id, b_id = ids[i], ids[j]
+        ma, mb = meta.get(a_id), meta.get(b_id)
+        if not ma or not mb or ma[0] != mb[0] or not _shareable(ma[3], mb[3]):
+            continue
+        if frozenset((a_id, b_id)) in related:
+            continue
+        a, b = get(a_id), get(b_id)
+        if not a or not b or a.duplicate_of or b.duplicate_of:
+            continue
+        if b_id in a.links or a_id in b.links:
+            continue
+        shared = sorted({e.lower() for e in a.entities} & {e.lower() for e in b.entities})
+        if not shared:
+            continue
+        out.append({"a": a_id, "b": b_id, "type": ma[0], "similarity": round(sim, 3),
+                    "shared_entities": shared, "a_text": a.text, "b_text": b.text})
+    out.sort(key=lambda c: -float(c["similarity"]))
+    return out

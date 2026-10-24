@@ -29,10 +29,11 @@ from .retrieval import Hit
 MAX_BODY = 1_000_000  # bytes
 
 _REMEMBER_KEYS = {"text", "type", "entities", "tags", "source", "confidence",
-                  "valid_from", "valid_to", "archive_text", "ring"}
+                  "valid_from", "valid_to", "archive_text", "ring",
+                  "due", "owner_agent", "review_by", "relations"}
 _RECALL_KEYS = {"query", "k", "types", "entities", "include_superseded", "scope"}
 _UPDATE_KEYS = {"id", "text", "type", "entities", "tags", "confidence",
-                "valid_from", "valid_to", "source"}
+                "valid_from", "valid_to", "source", "due", "owner_agent", "review_by"}
 
 
 class GatewayError(Exception):
@@ -55,7 +56,7 @@ def _pick(body: Dict[str, Any], allowed: set, required: tuple) -> Dict[str, Any]
 def _hit_json(h: Hit) -> Dict[str, Any]:
     return {"id": h.memory.id, "type": h.memory.type.value, "text": h.memory.text,
             "writer": h.memory.writer, "ring": h.memory.ring,
-            "confidence": h.memory.confidence,
+            "confidence": h.memory.confidence, "contested_with": h.contested_with,
             "entities": h.memory.entities, "score": round(h.score, 6),
             "via": h.strategies}
 

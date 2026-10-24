@@ -20,8 +20,8 @@ Two things keep recall clean:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .schema import Memory
 from .embeddings import EmbeddingProvider
@@ -33,6 +33,8 @@ class Hit:
     memory: Memory
     score: float
     strategies: List[str]
+    # ids of live memories this one has an unresolved `contradicts` edge with
+    contested_with: List[str] = field(default_factory=list)
 
 
 # Queries containing these tokens/phrases are asking about *time*, so the
@@ -88,9 +90,16 @@ class Retriever:
                entities: Optional[Sequence[str]] = None,
                use_recency: Optional[bool] = None,
                include_superseded: bool = False,
-               rings: Optional[Sequence[str]] = None) -> List[Hit]:
+               rings: Optional[Sequence[str]] = None,
+               superseded: Optional[Set[str]] = None,
+               contested: Optional[Mapping[str, List[str]]] = None) -> List[Hit]:
         """`rings` restricts every strategy to those rings (None = no ring
-        filter; the engine always passes the caller's resolved scope)."""
+        filter; the engine always passes the caller's resolved scope).
+        `superseded` ids (targets of a live `supersedes` relation) are hidden
+        like duplicates; `contested` maps id -> the ids it is contested with,
+        and is attached to each hit so nobody acts on it unknowingly."""
+        superseded = superseded or set()
+        contested = contested or {}
         ck = self.candidate_k
         ranked: Dict[str, List[str]] = {}
 
@@ -132,9 +141,12 @@ class Retriever:
             if not include_superseded:
                 if mem.duplicate_of:      # merged into a survivor by reflect()
                     continue
+                if mem.id in superseded:  # a reviewed memory supersedes it
+                    continue
                 if mem.is_expired():      # world_fact past its valid_to
                     continue
-            hits.append(Hit(memory=mem, score=score, strategies=strategies))
+            hits.append(Hit(memory=mem, score=score, strategies=strategies,
+                            contested_with=list(contested.get(mem.id, []))))
             if len(hits) >= k:
                 break
         return hits

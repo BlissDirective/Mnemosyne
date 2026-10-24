@@ -22,6 +22,10 @@ Every access rule lives in this module, so the policy can be read in one place:
           team:<t>         members, or tier >= 2
           proposed         tier >= 2 (reviewers)
 
+Policies (type `policy`) are the one deliberately instruction-like memory
+type, so they get the strictest rule in the system: only tier 3 may create
+one, edit one, or promote a proposed one into a shared ring.
+
 "Quarantined" means the write is not refused: it lands in `proposed` with the
 intended ring recorded, and becomes shared truth only when a *different*
 writer of tier >= 2 promotes it. Low-trust writers therefore physically cannot
@@ -114,7 +118,10 @@ def can_write_directly(ident: Identity, ring: str) -> bool:
 def check_can_modify(ident: Identity, mem) -> None:
     """Updating or forgetting an existing memory needs direct write access to
     its ring (no quarantine path: you cannot quietly edit shared truth). A
-    proposal can be edited by its proposer or a reviewer."""
+    proposal can be edited by its proposer or a reviewer. A live policy can be
+    changed by tier 3 only."""
+    if _type_value(mem) == POLICY and mem.ring != PROPOSED:
+        check_type_write(ident, POLICY)
     if mem.ring == PROPOSED:
         if ident.writer == mem.proposed_by or ident.tier >= TIER_SENIOR:
             return
@@ -124,6 +131,23 @@ def check_can_modify(ident: Identity, mem) -> None:
         f"{ident.writer} (tier {ident.tier}) cannot modify memory {mem.id} in "
         f"{mem.ring}. To suggest a change, call memory_propose with the id and "
         "the corrected text; a senior writer will review it.")
+
+
+POLICY = "policy"
+
+
+def _type_value(mem) -> str:
+    return getattr(mem.type, "value", mem.type)
+
+
+def check_type_write(ident: Identity, type_: str) -> None:
+    """Writing (creating, editing, or promoting) a policy needs tier 3."""
+    if str(getattr(type_, "value", type_)).lower() == POLICY and ident.tier < TIER_OWNER:
+        raise PermissionError(
+            f"{ident.writer} (tier {ident.tier}) cannot write a policy: policies are "
+            "standing instructions to every agent, so only the owner (tier 3) may "
+            "write them. Store it as a 'procedural' memory, or memory_propose it "
+            "for the owner to adopt.")
 
 
 # ---- read policy ------------------------------------------------------------

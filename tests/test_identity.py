@@ -80,7 +80,7 @@ def test_writer_shows_in_recall_and_prime(tmp_path):
     eng.remember("The user prefers Python.", type="preference", writer="claude-code",
                  ring="canon")
     hits = eng.recall("python preference")
-    assert "writer=claude-code" in _format_hits(hits)
+    assert "writer=claude-code" in _format_hits(hits, eng)
     assert "writer=claude-code" in eng.prime()
     eng.close()
 

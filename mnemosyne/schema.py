@@ -14,7 +14,7 @@ import os
 import re
 import secrets
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +31,12 @@ class MemoryType(str, Enum):
     WORLD_FACT = "world_fact"    # a fact about the world ("Alice works at Google")
     EXPERIENCE = "experience"    # something the agent itself did ("I recommended Python")
     PREFERENCE = "preference"    # a stated preference of the user
+    # business memory (v0.6): what an organization actually runs on
+    DECISION = "decision"        # statement, rationale, alternatives rejected, revisit-when
+    COMMITMENT = "commitment"    # a promise with a `due` date and an `owner_agent`
+    POLICY = "policy"            # a standing constraint agents must check before acting
+                                 # (instruction-like on purpose -> tier-3 writes only)
+    HYPOTHESIS = "hypothesis"    # a falsifiable belief with a `review_by` date
 
     @classmethod
     def coerce(cls, value: str) -> "MemoryType":
@@ -38,6 +44,10 @@ class MemoryType(str, Enum):
             return cls(str(value).strip().lower())
         except ValueError:
             return cls.SEMANTIC
+
+
+# typed relations between memories (see index.relations and Phase 3 in ROADMAP)
+RELATION_TYPES = ("supports", "contradicts", "supersedes", "evidence_for")
 
 
 def utcnow_iso() -> str:
@@ -92,6 +102,13 @@ class Memory:
     proposed_from: Optional[str] = None   # id it was copied from (memory_propose by id)
     promoted_by: Optional[str] = None     # reviewer who promoted it
     promoted_at: Optional[str] = None
+    # business types (v0.6)
+    due: Optional[str] = None             # commitment: ISO date it is due
+    owner_agent: Optional[str] = None     # commitment: who must deliver it
+    review_by: Optional[str] = None       # hypothesis: ISO date to resolve it by
+    # typed edges to other memories: [{rel, id, note?}], rel in RELATION_TYPES.
+    # Canonical (frontmatter), so they sync and survive index rebuilds.
+    relations: List[Dict[str, str]] = field(default_factory=list)
 
     # ---- convenience -----------------------------------------------------
     @property
@@ -126,6 +143,10 @@ class Memory:
                 "proposed_from": self.proposed_from,
                 "promoted_by": self.promoted_by,
                 "promoted_at": self.promoted_at,
+                "due": self.due,
+                "owner_agent": self.owner_agent,
+                "review_by": self.review_by,
+                "relations": sorted(json.dumps(r, sort_keys=True) for r in self.relations),
             },
             sort_keys=True,
         )
@@ -146,12 +167,12 @@ class Memory:
         d = asdict(self)
         d["type"] = self.type.value
         # keep frontmatter tidy: drop empties
-        for k in ("entities", "tags", "links"):
+        for k in ("entities", "tags", "links", "relations"):
             if not d[k]:
                 d.pop(k)
         for k in ("valid_from", "valid_to", "duplicate_of", "archive_ref", "last_recalled",
                   "proposed_by", "proposed_target", "proposed_from", "promoted_by",
-                  "promoted_at"):
+                  "promoted_at", "due", "owner_agent", "review_by"):
             if d[k] is None:
                 d.pop(k)
         if not d.get("recall_count"):
@@ -175,6 +196,12 @@ class Memory:
                 fm["recall_count"] = int(fm["recall_count"])
             except (TypeError, ValueError):
                 fm["recall_count"] = 0
+        # a hand-edited `due: 2026-11-01` parses as a date object; store strings
+        for k, v in list(fm.items()):
+            if isinstance(v, (date, datetime)):
+                fm[k] = v.isoformat()
+        if "relations" in fm:
+            fm["relations"] = _clean_relations(fm["relations"])
         # ignore unknown keys gracefully
         allowed = {f for f in cls.__dataclass_fields__}
         clean = {k: v for k, v in fm.items() if k in allowed}
@@ -184,6 +211,19 @@ class Memory:
         d = asdict(self)
         d["type"] = self.type.value
         return d
+
+
+def _clean_relations(raw: Any) -> List[Dict[str, str]]:
+    """Keep well-formed {rel, id[, note]} entries; drop anything else rather
+    than failing to read the memory."""
+    out: List[Dict[str, str]] = []
+    for r in raw if isinstance(raw, list) else []:
+        if isinstance(r, dict) and r.get("rel") in RELATION_TYPES and r.get("id"):
+            entry = {"rel": str(r["rel"]), "id": str(r["id"])}
+            if r.get("note"):
+                entry["note"] = str(r["note"])
+            out.append(entry)
+    return out
 
 
 def _split_frontmatter(raw: str):

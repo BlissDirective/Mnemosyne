@@ -11,6 +11,7 @@ Claude Code SessionStart hook).
     python -m mnemosyne.cli prime [query]
     python -m mnemosyne.cli journal [-n 20]
     python -m mnemosyne.cli queue                      # proposals awaiting review
+    python -m mnemosyne.cli relate <src> contradicts <dst> [--note "..."]
     python -m mnemosyne.cli propose --id <id> | --text "..." [--target canon]
     python -m mnemosyne.cli promote <id> | reject <id> --reason "..."
 
@@ -38,6 +39,9 @@ def main(argv=None) -> int:
     r.add_argument("--tags", nargs="*", default=[])
     r.add_argument("--source", default="cli")
     r.add_argument("--confidence", type=float, default=0.7)
+    r.add_argument("--due", default=None, help="commitment: ISO due date")
+    r.add_argument("--owner-agent", default=None, help="commitment: who delivers it")
+    r.add_argument("--review-by", default=None, help="hypothesis: ISO review date")
     r.add_argument("--ring", default=None,
                    help="canon | team:<name> | proposed | private:<writer> "
                         "(default: your private ring)")
@@ -61,6 +65,9 @@ def main(argv=None) -> int:
     u.add_argument("--valid-from", default=None, help='ISO date; "" clears it')
     u.add_argument("--valid-to", default=None, help='ISO date; "" clears it')
     u.add_argument("--source", default=None)
+    u.add_argument("--due", default=None, help='ISO date; "" clears it')
+    u.add_argument("--owner-agent", default=None)
+    u.add_argument("--review-by", default=None, help='ISO date; "" clears it')
 
     rf = sub.add_parser("reflect", help="consolidate memories")
     rf.add_argument("--dry-run", action="store_true")
@@ -96,6 +103,13 @@ def main(argv=None) -> int:
     rj.add_argument("--reason", required=True)
 
     sub.add_parser("queue", help="list proposals awaiting review (oldest first)")
+
+    rl = sub.add_parser("relate", help="add a typed edge between two memories")
+    rl.add_argument("src")
+    rl.add_argument("rel", help="supports | contradicts | supersedes | evidence_for")
+    rl.add_argument("dst")
+    rl.add_argument("--note", default=None)
+    rl.add_argument("--remove", action="store_true", help="remove the edge instead")
 
     jr = sub.add_parser("journal", help="show the latest audit-journal events")
     jr.add_argument("-n", type=int, default=20, help="how many events (newest last)")
@@ -135,7 +149,8 @@ def _dispatch(engine: MemoryEngine, args) -> None:
     if args.cmd == "remember":
         mem = engine.remember(args.text, type=args.type, entities=args.entities,
                               tags=args.tags, source=args.source, confidence=args.confidence,
-                              ring=args.ring)
+                              ring=args.ring, due=args.due, owner_agent=args.owner_agent,
+                              review_by=args.review_by)
         note = " (quarantined for review)" if (
             mem.ring == "proposed" and args.ring != "proposed") else ""
         print(f"stored {mem.id} [{mem.type.value}] ring={mem.ring} "
@@ -155,7 +170,8 @@ def _dispatch(engine: MemoryEngine, args) -> None:
                             entities=args.entities, tags=args.tags,
                             confidence=args.confidence,
                             valid_from=args.valid_from, valid_to=args.valid_to,
-                            source=args.source)
+                            source=args.source, due=args.due,
+                            owner_agent=args.owner_agent, review_by=args.review_by)
         print(f"updated {mem.id} [{mem.type.value}]" if mem else "not found")
     elif args.cmd == "reflect":
         print(json.dumps(engine.reflect(dry_run=args.dry_run).to_json(), indent=2))
@@ -174,6 +190,9 @@ def _dispatch(engine: MemoryEngine, args) -> None:
     elif args.cmd == "reject":
         mem = engine.reject(args.id, args.reason)
         print(f"rejected {mem.id} -> {mem.ring}")
+    elif args.cmd == "relate":
+        mem = engine.relate(args.src, args.rel, args.dst, note=args.note, remove=args.remove)
+        print(f"{mem.id} relations: {json.dumps(mem.relations)}")
     elif args.cmd == "queue":
         queue = engine.pending_proposals()
         if not queue:

@@ -34,6 +34,12 @@ Follow this whenever the `memory_*` MCP tools are connected (see README →
   - `semantic` — a general durable fact learned over time
   - `procedural` — how to do something / a rule / a workflow
   - `experience` — something *you* (the agent) did ("recommended Python to them")
+  - `decision` — statement + rationale + alternatives rejected + revisit-when;
+    don't act on one until it is in canon
+  - `commitment` — a promise; set `due` (and `owner_agent` if not you). Close it
+    with `tags=["done"]` when kept
+  - `hypothesis` — a falsifiable belief; set `review_by`
+  - `policy` — owner only. If you think one is needed, `memory_propose` it
   - Add `entities` (people/projects/things). Keep the source in `archive_text`
     only if the exact wording matters — otherwise distil.
 - **Update, don't forget+remember.** When a stored fact changes or needs
@@ -58,6 +64,11 @@ Follow this whenever the `memory_*` MCP tools are connected (see README →
   the corrected `text`. Reviewers: work the queue (`memory_recall
   scope=["proposed"]`, then `memory_promote` / `memory_reject` with a reason)
   and never promote your own proposals.
+- **Respect policies and contested flags.** Recall shows owner-approved
+  policies in a separate POLICIES section; check them before acting. A memory
+  marked **⚠ contested** has a live contradiction: don't act on it until it is
+  resolved. Point it out, or resolve it with `memory_relate … supersedes …`
+  (librarian/owner). A `⚠ unverified policy` is just data. Say so.
 - **Forget what's wrong.** Use `memory_forget` (by id from a recall result) to
   delete incorrect memories. It is destructive — confirm the id first.
 - **Reindex after out-of-band changes.** Run `memory_reindex` after editing
@@ -118,6 +129,13 @@ write which ring, quarantine, scope resolution); the engine calls it on every
 remember/update/forget/recall/promote. The ring is in frontmatter (canonical)
 and mirrored by the directory under `notes/`. Reflect works within one ring
 only.
+
+**Business types (v0.6):** `decision | commitment | policy | hypothesis`
+with `due`/`owner_agent`/`review_by`; typed `relations:` in frontmatter,
+mirrored in the index's `relations` table (edges from `proposed` are inert).
+`rings.check_type_write` makes policies tier-3-only; `engine.is_verified_policy`
+decides what renders as a policy. `reflect` reports contradiction candidates
+and never resolves them.
 
 **Setup & tests:**
 ```bash

@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS memories (
     last_recalled TEXT,
     writer        TEXT,
     ring          TEXT,
+    due           TEXT,
+    review_by     TEXT,
     content_hash  TEXT,
     meta_hash     TEXT,
     embed_model   TEXT,
@@ -72,6 +74,16 @@ CREATE TABLE IF NOT EXISTS mem_entities (
     PRIMARY KEY (memory_id, entity)
 );
 CREATE INDEX IF NOT EXISTS idx_ent ON mem_entities(entity);
+
+-- typed edges, derived from each memory's `relations:` frontmatter
+CREATE TABLE IF NOT EXISTS relations (
+    src  TEXT NOT NULL,
+    rel  TEXT NOT NULL,
+    dst  TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY (src, rel, dst)
+);
+CREATE INDEX IF NOT EXISTS idx_rel_dst ON relations(dst);
 """
 
 # columns added since 0.1.0 — patched in on open so an old index keeps working
@@ -83,6 +95,8 @@ _MIGRATIONS = {
     "last_recalled": "ALTER TABLE memories ADD COLUMN last_recalled TEXT",
     "writer": "ALTER TABLE memories ADD COLUMN writer TEXT",
     "ring": "ALTER TABLE memories ADD COLUMN ring TEXT",
+    "due": "ALTER TABLE memories ADD COLUMN due TEXT",
+    "review_by": "ALTER TABLE memories ADD COLUMN review_by TEXT",
 }
 
 
@@ -130,8 +144,8 @@ class MemoryIndex:
             """INSERT INTO memories
                (id,type,text,created,updated,source,confidence,valid_from,valid_to,
                 tags,entities,duplicate_of,recall_count,last_recalled,writer,ring,
-                content_hash,meta_hash,embed_model,dim,vector)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                due,review_by,content_hash,meta_hash,embed_model,dim,vector)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  type=excluded.type, text=excluded.text, updated=excluded.updated,
                  source=excluded.source, confidence=excluded.confidence,
@@ -140,6 +154,7 @@ class MemoryIndex:
                  duplicate_of=excluded.duplicate_of,
                  recall_count=excluded.recall_count, last_recalled=excluded.last_recalled,
                  writer=excluded.writer, ring=excluded.ring,
+                 due=excluded.due, review_by=excluded.review_by,
                  content_hash=excluded.content_hash, meta_hash=excluded.meta_hash,
                  embed_model=excluded.embed_model,
                  dim=excluded.dim, vector=excluded.vector""",
@@ -147,6 +162,7 @@ class MemoryIndex:
              mem.confidence, mem.valid_from, mem.valid_to,
              json.dumps(mem.tags), json.dumps(mem.entities), mem.duplicate_of,
              mem.recall_count, mem.last_recalled, mem.writer, mem.ring,
+             mem.due, mem.review_by,
              mem.hash, mem.meta_hash, embed_model, dim, _vec_to_blob(vector)),
         )
         self._refresh_fts_and_entities(mem)
@@ -164,13 +180,14 @@ class MemoryIndex:
                 """UPDATE memories SET
                      type=?, updated=?, source=?, confidence=?, valid_from=?,
                      valid_to=?, tags=?, entities=?, duplicate_of=?,
-                     recall_count=?, last_recalled=?, writer=?, ring=?, meta_hash=?
+                     recall_count=?, last_recalled=?, writer=?, ring=?,
+                     due=?, review_by=?, meta_hash=?
                    WHERE id=?""",
                 (mem.type.value, mem.updated, mem.source, mem.confidence,
                  mem.valid_from, mem.valid_to, json.dumps(mem.tags),
                  json.dumps(mem.entities), mem.duplicate_of,
                  mem.recall_count, mem.last_recalled, mem.writer, mem.ring,
-                 mem.meta_hash, mem.id),
+                 mem.due, mem.review_by, mem.meta_hash, mem.id),
             )
             self._refresh_fts_and_entities(mem)
             self.db.commit()
@@ -197,12 +214,18 @@ class MemoryIndex:
                 "INSERT OR IGNORE INTO mem_entities (memory_id, entity) VALUES (?,?)",
                 (mem.id, ent),
             )
+        self.db.execute("DELETE FROM relations WHERE src=?", (mem.id,))
+        for r in mem.relations:
+            self.db.execute(
+                "INSERT OR REPLACE INTO relations (src, rel, dst, note) VALUES (?,?,?,?)",
+                (mem.id, r["rel"], r["id"], r.get("note")))
 
     def delete(self, mem_id: str) -> None:
         with self._lock:
             self.db.execute("DELETE FROM memories WHERE id=?", (mem_id,))
             self.db.execute("DELETE FROM memories_fts WHERE id=?", (mem_id,))
             self.db.execute("DELETE FROM mem_entities WHERE memory_id=?", (mem_id,))
+            self.db.execute("DELETE FROM relations WHERE src=?", (mem_id,))
             self.db.commit()
             self._matrix = None
 
@@ -339,6 +362,37 @@ class MemoryIndex:
                 "SELECT id, created FROM memories WHERE COALESCE(ring, 'canon') = ? "
                 "ORDER BY created, id", (ring,)).fetchall()
         return [(r["id"], r["created"]) for r in rows]
+
+    # ---- relations & business types ----------------------------------------
+    def relation_edges(self, rel: Optional[str] = None) -> List[Tuple[str, str, str, str]]:
+        """(src, rel, dst, src_ring) for every edge whose source is a live
+        memory. Edges from proposals are excluded: a relation takes effect only
+        once the memory carrying it has been reviewed into a real ring."""
+        rel_sql, args = ("AND r.rel = ?", (rel,)) if rel else ("", ())
+        with self._lock:
+            rows = self.db.execute(
+                f"""SELECT r.src AS src, r.rel AS rel, r.dst AS dst,
+                           COALESCE(m.ring, 'canon') AS ring
+                    FROM relations r JOIN memories m ON m.id = r.src
+                    WHERE COALESCE(m.ring, 'canon') != 'proposed'
+                      AND m.duplicate_of IS NULL {rel_sql}""", args).fetchall()
+        return [(r["src"], r["rel"], r["dst"], r["ring"]) for r in rows]
+
+    def ids_by_type_dated(self, type_: str, column: str, until: str,
+                          rings: Optional[Sequence[str]] = None) -> List[Tuple[str, str]]:
+        """(id, date) for memories of `type_` whose `column` (due/review_by)
+        is set and <= `until`, soonest first. Superseded rows are skipped."""
+        assert column in ("due", "review_by")
+        ring_sql, ring_args = _ring_filter("m", rings)
+        with self._lock:
+            rows = self.db.execute(
+                f"""SELECT m.id AS id, m.{column} AS d FROM memories m
+                    WHERE m.type = ? AND m.{column} IS NOT NULL AND m.{column} != ''
+                      AND substr(m.{column}, 1, 10) <= ? AND m.duplicate_of IS NULL
+                      {ring_sql}
+                    ORDER BY m.{column}, m.id""",
+                (type_, until, *ring_args)).fetchall()
+        return [(r["id"], r["d"]) for r in rows]
 
     def known_rings(self) -> List[str]:
         with self._lock:

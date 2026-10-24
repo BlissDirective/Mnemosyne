@@ -75,6 +75,7 @@ mnemosyne/
 ├── tests/test_pipeline.py      offline suite: core engine
 ├── tests/test_identity.py      identity, HTTP auth, journal, hammer tests
 ├── tests/test_rings.py         rings, quarantine, promotion workflow
+├── tests/test_business_types.py  decisions/commitments/policies, relations, contradictions
 ├── tests/live_stdio_check.py   real MCP client <-> server round trip
 ├── config.example.toml
 ├── pyproject.toml
@@ -256,6 +257,40 @@ Notes that matter:
   problem can never block a session from starting.
 - Cloud sessions don't read your local `~/.claude/settings.json`; this hook is
   for Claude Code running on your machine.
+
+---
+
+## Business memory: decisions, commitments, policies, hypotheses
+
+Four types (v0.6) for what an organization actually runs on:
+
+| Type | Use it for | Extra fields |
+|---|---|---|
+| `decision` | statement, rationale, alternatives rejected, revisit-when | — must be in canon before anyone acts on it (recall flags unratified ones) |
+| `commitment` | a promise someone must keep | `due`, `owner_agent`. `prime` lists those due within 7 days or overdue at the top. Close one with `tags: [done]` or `valid_to`. |
+| `policy` | a standing constraint ("never discount below 20%") | **tier 3 writes only.** Recall and `prime` show policies in their own labeled section. |
+| `hypothesis` | a falsifiable belief | `review_by` |
+
+Policies are the one deliberate exception to "memories are data, not
+instructions", and the strict write rule is what makes that exception safe.
+Only a policy that sits in canon and was written or adopted by the owner is
+shown as a policy. A policy-typed file from anywhere else (a tampered sync, a
+hand edit) is shown as `⚠ unverified policy` data. Agents may *propose* a
+policy, but only the owner can promote it.
+
+**Typed relations.** `memory_relate src <rel> dst` with `supports`,
+`contradicts`, `supersedes`, or `evidence_for`. Relations live in the
+source memory's frontmatter (`relations:`), so they sync and survive
+rebuilds, and they take effect only once that memory is out of the review
+queue.
+
+**Contradictions are surfaced, never auto-resolved.** `reflect` reports
+candidates in `contested`: same type, a shared entity, and similar enough to be
+about the same thing but not duplicates (cosine 0.70–0.94, configurable with
+`[consolidation] contradiction_band`). The librarian or owner resolves each
+one: `supersedes` retires the loser from default recall, while `contradicts`
+records the disagreement. Recall marks every memory with a live `contradicts`
+edge as **⚠ contested**, so no agent acts on a disputed belief unknowingly.
 
 ---
 
