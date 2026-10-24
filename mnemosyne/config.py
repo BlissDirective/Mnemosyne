@@ -11,6 +11,22 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+# Trust tiers (who may write what is enforced from Phase 2 on; Phase 1 records
+# them so every write is attributable to a known writer):
+#   0 untrusted · 1 standard · 2 senior · 3 owner
+TIER_UNTRUSTED, TIER_STANDARD, TIER_SENIOR, TIER_OWNER = 0, 1, 2, 3
+
+
+@dataclass
+class WriterSpec:
+    tier: int = TIER_STANDARD
+
+
+def _default_writers() -> Dict[str, WriterSpec]:
+    # single-user default: the owner is the only writer
+    return {"owner": WriterSpec(tier=TIER_OWNER)}
+
+
 def _default_root() -> Path:
     # Canonical memory lives here by default; override with MNEMOSYNE_HOME.
     return Path(os.environ.get("MNEMOSYNE_HOME", "~/mnemosyne")).expanduser()
@@ -45,6 +61,15 @@ class Config:
     decay_min_age_days: int = 30      # a memory is decay-eligible only if it was
                                       # neither updated NOR recalled in this window
 
+    # identity
+    writer: str = "owner"             # writer id for local (stdio/CLI) use;
+                                      # over HTTP the bearer token decides
+    writers: Dict[str, WriterSpec] = field(default_factory=_default_writers)
+
+    # HTTP transport
+    http_host: str = "127.0.0.1"
+    http_port: int = 8787
+
     # ---- derived paths ---------------------------------------------------
     @property
     def notes_dir(self) -> Path:
@@ -59,11 +84,20 @@ class Config:
         return self.root / ".index"
 
     @property
+    def journal_dir(self) -> Path:
+        return self.root / "journal"
+
+    @property
     def db_path(self) -> Path:
         return self.index_dir / "memory.db"
 
+    def tier_of(self, writer: str) -> int:
+        """A writer's trust tier. Unknown writers are untrusted (fail closed)."""
+        spec = self.writers.get(writer)
+        return spec.tier if spec else TIER_UNTRUSTED
+
     def ensure_dirs(self) -> None:
-        for p in (self.notes_dir, self.archive_dir, self.index_dir):
+        for p in (self.notes_dir, self.archive_dir, self.index_dir, self.journal_dir):
             p.mkdir(parents=True, exist_ok=True)
 
 
@@ -98,5 +132,29 @@ def load_config(root: Optional[str] = None) -> Config:
     cfg.decay_per_reflect = float(con.get("decay_per_reflect", cfg.decay_per_reflect))
     cfg.decay_min_age_days = int(con.get("decay_min_age_days", cfg.decay_min_age_days))
 
+    if "writers" in data:
+        cfg.writers = _parse_writers(data["writers"])
+    cfg.writer = os.environ.get("MNEMOSYNE_WRITER", cfg.writer).strip() or cfg.writer
+
+    http = data.get("http", {})
+    cfg.http_host = str(http.get("host", cfg.http_host))
+    cfg.http_port = int(http.get("port", cfg.http_port))
+
     cfg.ensure_dirs()
     return cfg
+
+
+def _parse_writers(raw: Dict[str, Any]) -> Dict[str, WriterSpec]:
+    """`[writers]` maps writer id -> `{ tier = N }` (or the shorthand `id = N`).
+    Tokens are never stored here; they live in MNEMOSYNE_TOKEN_<WRITER> env vars."""
+    out: Dict[str, WriterSpec] = {}
+    for writer, spec in raw.items():
+        if isinstance(spec, int):
+            spec = {"tier": spec}
+        if not isinstance(spec, dict):
+            raise ValueError(f"[writers] {writer}: expected a table like {{ tier = 1 }}")
+        tier = int(spec.get("tier", TIER_STANDARD))
+        if not TIER_UNTRUSTED <= tier <= TIER_OWNER:
+            raise ValueError(f"[writers] {writer}: tier must be 0-3, got {tier}")
+        out[writer] = WriterSpec(tier=tier)
+    return out

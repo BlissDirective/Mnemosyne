@@ -10,10 +10,18 @@ from producing a noisy diff on every single recall, while the canonical layer
 (the source of truth) still carries the counters across devices. Counters are
 advisory usage signals: if the process dies between flushes, at most a few
 pending increments are lost.
+
+Identity and audit: every operation runs as a writer (the `writer` argument,
+defaulting to the configured local writer), new memories record their author,
+and every mutation — including reflect's edits and counter flushes — is
+appended to the journal. One re-entrant lock serializes the engine, so many
+concurrent clients (HTTP requests on worker threads) cannot interleave a
+read-modify-write.
 """
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -24,6 +32,10 @@ from .embeddings import get_provider, EmbeddingProvider
 from .index import MemoryIndex, reindex
 from .retrieval import Retriever, Hit
 from .consolidate import reflect, ReflectReport
+from .journal import Journal
+
+# writer id used for engine-internal maintenance (counter flushes)
+SYSTEM_WRITER = "system"
 
 
 class MemoryEngine:
@@ -38,19 +50,26 @@ class MemoryEngine:
             self.store, self.index, self.provider,
             candidate_k=self.cfg.candidate_k, rrf_k=self.cfg.rrf_k,
             recency_weight=self.cfg.recency_weight)
+        self.journal = Journal(self.cfg.journal_dir)
+        self._lock = threading.RLock()
         # pending access-counter write-backs: id -> (delta, last_recalled_ts)
         self._pending_access: Dict[str, List] = {}
         self._pending_total: int = 0
 
+    def _writer(self, writer: Optional[str]) -> str:
+        return (writer or self.cfg.writer).strip()
+
     # ---- lifecycle -------------------------------------------------------
     def sync(self, force: bool = False) -> Dict[str, int]:
         """Reconcile the derived index with the canonical notes."""
-        self.flush_access()
-        return reindex(self.store, self.index, self.provider, force=force)
+        with self._lock:
+            self.flush_access()
+            return reindex(self.store, self.index, self.provider, force=force)
 
     def close(self) -> None:
-        self.flush_access()
-        self.index.close()
+        with self._lock:
+            self.flush_access()
+            self.index.close()
 
     # ---- operations ------------------------------------------------------
     def remember(self, text: str, type: str = "semantic",
@@ -58,8 +77,11 @@ class MemoryEngine:
                  tags: Optional[Sequence[str]] = None,
                  source: str = "manual", confidence: float = 0.7,
                  valid_from: Optional[str] = None, valid_to: Optional[str] = None,
-                 archive_text: Optional[str] = None) -> Memory:
+                 archive_text: Optional[str] = None,
+                 writer: Optional[str] = None) -> Memory:
+        writer = self._writer(writer)
         mem = Memory(
+            writer=writer,
             text=text.strip(),
             type=MemoryType.coerce(type),
             entities=[e.strip() for e in (entities or []) if e.strip()],
@@ -75,9 +97,11 @@ class MemoryEngine:
                 mem.archive_ref = str(raw_path.relative_to(self.cfg.root))
             except ValueError:
                 mem.archive_ref = str(raw_path)
-        self.store.write(mem)
         vec = self.provider.embed_one(mem.text)
-        self.index.upsert(mem, vec, self.provider.name)
+        with self._lock:
+            self.journal.append("remember", writer, mem=mem)
+            self.store.write(mem)
+            self.index.upsert(mem, vec, self.provider.name)
         return mem
 
     def update(self, mem_id: str,
@@ -88,7 +112,8 @@ class MemoryEngine:
                confidence: Optional[float] = None,
                valid_from: Optional[str] = None,
                valid_to: Optional[str] = None,
-               source: Optional[str] = None) -> Optional[Memory]:
+               source: Optional[str] = None,
+               writer: Optional[str] = None) -> Optional[Memory]:
         """Edit a memory in place, preserving its id, created timestamp, links,
         duplicate_of, archive_ref and access counters — the supersede-without-
         destroying alternative to forget + remember.
@@ -99,8 +124,16 @@ class MemoryEngine:
 
         A text change re-embeds and fully upserts; anything else is a cheap
         metadata refresh. Returns the updated Memory, or None if the id is
-        unknown.
+        unknown. The memory keeps its original author (`writer`); the journal
+        records who made the change.
         """
+        with self._lock:
+            return self._update_locked(
+                mem_id, text, type, entities, tags, confidence,
+                valid_from, valid_to, source, self._writer(writer))
+
+    def _update_locked(self, mem_id, text, type, entities, tags, confidence,
+                       valid_from, valid_to, source, writer) -> Optional[Memory]:
         mem = self.store.read_by_id(mem_id)
         if mem is None:
             return None
@@ -125,6 +158,7 @@ class MemoryEngine:
             mem.source = source.strip()
 
         mem.touch()
+        self.journal.append("update", writer, mem=mem)
         self.store.write(mem)  # renames the file if the slug changed
         if text_changed:
             vec = self.provider.embed_one(mem.text)
@@ -137,30 +171,48 @@ class MemoryEngine:
                types: Optional[Sequence[str]] = None,
                entities: Optional[Sequence[str]] = None,
                include_superseded: bool = False,
-               record_access: bool = True) -> List[Hit]:
-        hits = self.retriever.recall(
-            query, k=k or self.cfg.recall_k, types=types, entities=entities,
-            include_superseded=include_superseded)
-        if record_access and hits:
-            self._record_access([h.memory.id for h in hits])
-        return hits
+               record_access: bool = True,
+               writer: Optional[str] = None) -> List[Hit]:
+        with self._lock:
+            hits = self.retriever.recall(
+                query, k=k or self.cfg.recall_k, types=types, entities=entities,
+                include_superseded=include_superseded)
+            if record_access and hits:
+                self._record_access([h.memory.id for h in hits])
+            return hits
 
-    def reflect(self, dry_run: bool = False) -> ReflectReport:
-        self.flush_access()  # decay reads last_recalled from the canonical files
-        return reflect(self.store, self.index,
-                       dedup_threshold=self.cfg.dedup_threshold,
-                       decay=self.cfg.decay_per_reflect,
-                       decay_min_age_days=self.cfg.decay_min_age_days,
-                       dry_run=dry_run)
+    def reflect(self, dry_run: bool = False,
+                writer: Optional[str] = None) -> ReflectReport:
+        writer = self._writer(writer)
 
-    def forget(self, mem_id: str) -> bool:
-        self._pending_access.pop(mem_id, None)
-        ok = self.store.delete(mem_id)
-        self.index.delete(mem_id)
-        return ok
+        def persist(mem: Memory) -> None:
+            mem.touch()
+            self.journal.append("reflect", writer, mem=mem)
+            self.store.write(mem)
+            self.index.update_meta(mem)
+
+        with self._lock:
+            self.flush_access()  # decay reads last_recalled from the canonical files
+            return reflect(self.store, self.index,
+                           dedup_threshold=self.cfg.dedup_threshold,
+                           decay=self.cfg.decay_per_reflect,
+                           decay_min_age_days=self.cfg.decay_min_age_days,
+                           dry_run=dry_run, persist=persist)
+
+    def forget(self, mem_id: str, writer: Optional[str] = None) -> bool:
+        with self._lock:
+            self._pending_access.pop(mem_id, None)
+            mem = self.store.read_by_id(mem_id)
+            if mem is not None:
+                self.journal.append("forget", self._writer(writer), mem_id,
+                                    content_hash=mem.hash)
+            ok = self.store.delete(mem_id)
+            self.index.delete(mem_id)
+            return ok
 
     def get(self, mem_id: str) -> Optional[Memory]:
-        return self.store.read_by_id(mem_id)
+        with self._lock:
+            return self.store.read_by_id(mem_id)
 
     def resolve_archive(self, mem: Memory) -> Optional[Path]:
         """Resolve a memory's archive_ref to an absolute path on THIS machine.
@@ -191,6 +243,10 @@ class MemoryEngine:
         Returns how many files were updated. Deliberately does NOT touch()
         `updated` — counters carry their own timestamp, and `updated` keeps
         meaning 'content or curation changed'."""
+        with self._lock:
+            return self._flush_access_locked()
+
+    def _flush_access_locked(self) -> int:
         if not self._pending_access:
             return 0
         pending, self._pending_access = self._pending_access, {}
@@ -203,6 +259,7 @@ class MemoryEngine:
             mem.recall_count += delta
             if not mem.last_recalled or ts > mem.last_recalled:
                 mem.last_recalled = ts
+            self.journal.append("access", SYSTEM_WRITER, mem=mem)
             self.store.write(mem)
             self.index.update_meta(mem)
             flushed += 1
@@ -216,6 +273,10 @@ class MemoryEngine:
         capped at 10,000 characters — stay under it). With a query, it recalls;
         without one, it picks the best standing context: not superseded, ranked
         by confidence + actual usage + recency, expired facts dropped."""
+        with self._lock:
+            return self._prime_locked(query, k, max_chars)
+
+    def _prime_locked(self, query: Optional[str], k: int, max_chars: int) -> str:
         s = self.index.stats()
         if query:
             hits = self.recall(query, k=k, record_access=False)
@@ -238,7 +299,7 @@ class MemoryEngine:
             lines.append("(no memories yet)")
         for m in mems:
             entry = f"- [{m.type.value}] {m.text}"
-            meta = f"  (id={m.id}, confidence={m.confidence}"
+            meta = f"  (id={m.id}, writer={m.writer}, confidence={m.confidence}"
             if m.entities:
                 meta += f", entities={', '.join(m.entities)}"
             meta += ")"
@@ -249,7 +310,8 @@ class MemoryEngine:
         return "\n".join(lines)
 
     def stats(self) -> Dict[str, object]:
-        s = self.index.stats()
+        with self._lock:
+            s = self.index.stats()
         s["provider"] = self.provider.name
         s["dim"] = self.provider.dim
         s["root"] = str(self.cfg.root)

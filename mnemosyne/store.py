@@ -7,6 +7,8 @@ folder (or Obsidian) sees meaningful names.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
@@ -39,9 +41,9 @@ class MarkdownStore:
         """Create or overwrite the memory's file (renaming if the slug changed)."""
         existing = self.path_by_id(mem.id)
         target = self._path_for(mem)
+        _atomic_write(target, mem.to_markdown())
         if existing and existing != target:
             existing.unlink(missing_ok=True)
-        target.write_text(mem.to_markdown(), encoding="utf-8")
         return target
 
     def read(self, path: Path) -> Memory:
@@ -81,3 +83,16 @@ class MarkdownStore:
         header = f"<!-- archived {utcnow_iso()} | label={label} -->\n\n"
         path.write_text(header + text.strip() + "\n", encoding="utf-8")
         return path
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file + rename so a concurrent reader (another writer's
+    request, a sync tool, `git add`) never sees a half-written memory."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".md.part")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise

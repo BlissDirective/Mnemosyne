@@ -13,13 +13,21 @@ Code) can persist and retrieve memory across sessions:
     memory_reindex    rebuild the derived index from the canonical notes
 
 Run (stdio):  python -m mnemosyne.server
+         (identity: MNEMOSYNE_WRITER, default "owner")
+Run (HTTP):   mnemosyne-server --http [--host 127.0.0.1] [--port 8787]
+         (MCP streamable HTTP at /mcp; every request needs
+          `Authorization: Bearer <token>`, and the token decides the writer)
 Config:       ~/mnemosyne/config.toml  (or env: MNEMOSYNE_HOME, MNEMOSYNE_PROVIDER, ...)
 """
 
 from __future__ import annotations
 
+import argparse
 import atexit
+import contextvars
 import json
+import os
+import sys
 from typing import List, Optional
 
 # MCP Python SDK 2.x renamed FastMCP -> MCPServer (mcp.server.mcpserver); the
@@ -31,6 +39,7 @@ except ImportError:  # mcp 1.x
 
 from pydantic import BaseModel, Field, ConfigDict
 
+from .auth import Identity, bearer_token, resolve_token, token_env_name
 from .engine import MemoryEngine
 from .retrieval import Hit
 
@@ -49,6 +58,18 @@ def engine() -> MemoryEngine:
         # flush any pending access-counter write-backs when the process exits
         atexit.register(_engine.flush_access)
     return _engine
+
+
+# The identity of the current tool call. Over HTTP the auth middleware sets it
+# from the bearer token before any tool runs; over stdio it stays unset and
+# the engine falls back to its configured local writer (MNEMOSYNE_WRITER).
+_current: contextvars.ContextVar[Optional[Identity]] = contextvars.ContextVar(
+    "mnemosyne_identity", default=None)
+
+
+def caller() -> Optional[str]:
+    ident = _current.get()
+    return ident.writer if ident else None
 
 
 # --------------------------------------------------------------------------- #
@@ -157,7 +178,7 @@ def _format_hits(hits: List[Hit]) -> str:
         m = h.memory
         via = "+".join(h.strategies)
         head = f"- [{m.type.value}] {m.text}"
-        meta = f"    id={m.id} · confidence={m.confidence} · via={via}"
+        meta = f"    id={m.id} · writer={m.writer} · confidence={m.confidence} · via={via}"
         if m.entities:
             meta += f" · entities={', '.join(m.entities)}"
         if m.valid_from or m.valid_to:
@@ -188,10 +209,10 @@ def memory_remember(params: RememberInput) -> str:
             text=params.text, type=params.type, entities=params.entities,
             tags=params.tags, source=params.source, confidence=params.confidence,
             valid_from=params.valid_from, valid_to=params.valid_to,
-            archive_text=params.archive_text,
+            archive_text=params.archive_text, writer=caller(),
         )
         return json.dumps({"status": "ok", "id": mem.id, "type": mem.type.value,
-                           "stored": mem.text}, indent=2)
+                           "writer": mem.writer, "stored": mem.text}, indent=2)
     except Exception as e:
         return f"Error storing memory: {type(e).__name__}: {e}"
 
@@ -217,7 +238,7 @@ def memory_recall(params: RecallInput) -> str:
         hits = engine().recall(
             params.query, k=params.k,
             types=params.types or None, entities=params.entities or None,
-            include_superseded=params.include_superseded)
+            include_superseded=params.include_superseded, writer=caller())
         return _format_hits(hits)
     except Exception as e:
         return f"Error during recall: {type(e).__name__}: {e}"
@@ -245,7 +266,7 @@ def memory_update(params: UpdateInput) -> str:
             entities=params.entities, tags=params.tags,
             confidence=params.confidence,
             valid_from=params.valid_from, valid_to=params.valid_to,
-            source=params.source,
+            source=params.source, writer=caller(),
         )
         if mem is None:
             return json.dumps({"status": "not_found", "id": params.id,
@@ -271,7 +292,7 @@ def memory_reflect(params: ReflectInput) -> str:
     the survivor + memory_forget the rest) if you want cleaner entries. Returns
     a report of what changed."""
     try:
-        report = engine().reflect(dry_run=params.dry_run)
+        report = engine().reflect(dry_run=params.dry_run, writer=caller())
         return json.dumps({"dry_run": params.dry_run, **report.to_json()}, indent=2)
     except Exception as e:
         return f"Error during reflect: {type(e).__name__}: {e}"
@@ -287,7 +308,7 @@ def memory_forget(params: ForgetInput) -> str:
     Destructive and not easily undone — confirm the id from a recall result
     first. To correct a fact rather than erase it, use memory_update instead."""
     try:
-        ok = engine().forget(params.id)
+        ok = engine().forget(params.id, writer=caller())
         return json.dumps({"status": "ok" if ok else "not_found", "id": params.id})
     except Exception as e:
         return f"Error during forget: {type(e).__name__}: {e}"
@@ -326,8 +347,75 @@ def memory_reindex(params: ReindexInput) -> str:
         return f"Error during reindex: {type(e).__name__}: {e}"
 
 
-def main() -> None:
-    mcp.run(transport="stdio")  # explicit: valid on both mcp 1.x and 2.x
+# --------------------------------------------------------------------------- #
+# HTTP transport: MCP streamable HTTP behind bearer-token auth
+# --------------------------------------------------------------------------- #
+class BearerAuth:
+    """ASGI middleware: resolve `Authorization: Bearer <token>` to a rostered
+    writer, or answer 401 before the request reaches MCP (and so before any
+    engine call). The resolved identity rides a contextvar into the tool."""
+
+    def __init__(self, app, cfg):
+        self.app = app
+        self.cfg = cfg
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        ident = resolve_token(self.cfg, bearer_token(headers.get("authorization")))
+        if ident is None:
+            body = json.dumps({"error": "unauthorized",
+                               "hint": "send Authorization: Bearer <token>; the token "
+                                       "must match MNEMOSYNE_TOKEN_<WRITER> for a writer "
+                                       "listed under [writers] in config.toml"}).encode()
+            await send({"type": "http.response.start", "status": 401,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"www-authenticate", b"Bearer")]})
+            await send({"type": "http.response.body", "body": body})
+            return
+        token = _current.set(ident)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _current.reset(token)
+
+
+def http_app():
+    """The authenticated ASGI app. Stateless streamable HTTP: each request is
+    self-contained, so identity never leaks between clients."""
+    inner = mcp.streamable_http_app(stateless_http=True, json_response=True)
+    return BearerAuth(inner, engine().cfg)
+
+
+def serve_http(host: str, port: int) -> None:
+    import uvicorn
+    cfg = engine().cfg
+    app = http_app()
+    armed = sorted(w for w in cfg.writers if os.environ.get(token_env_name(w)))
+    if not armed:
+        print("[mnemosyne] warning: no writer has a token set "
+              "(MNEMOSYNE_TOKEN_<WRITER>); every request will be rejected",
+              file=sys.stderr)
+    print(f"[mnemosyne] MCP over HTTP at http://{host}:{port}/mcp "
+          f"(writers with tokens: {', '.join(armed) or 'none'})", file=sys.stderr)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+def main(argv=None) -> None:
+    p = argparse.ArgumentParser(prog="mnemosyne-server",
+                                description="Mnemosyne MCP server (stdio by default)")
+    p.add_argument("--http", action="store_true",
+                   help="serve MCP streamable HTTP with bearer-token auth instead of stdio")
+    p.add_argument("--host", default=None, help="HTTP bind host (default from config: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=None, help="HTTP port (default from config: 8787)")
+    args = p.parse_args(argv)
+    if args.http:
+        cfg = engine().cfg
+        serve_http(args.host or cfg.http_host, args.port or cfg.http_port)
+    else:
+        mcp.run(transport="stdio")  # explicit: valid on both mcp 1.x and 2.x
 
 
 if __name__ == "__main__":

@@ -66,9 +66,13 @@ mnemosyne/
 │   ├── retrieval.py    semantic + keyword + graph (+ gated recency), weighted RRF
 │   ├── consolidate.py  reflect(): dedup, reinforce, access-gated decay
 │   ├── engine.py       update-in-place, access counters, prime(); wires it all
-│   ├── server.py       FastMCP/MCPServer: the 7 memory_* tools (mcp 1.x & 2.x)
+│   ├── server.py       FastMCP/MCPServer: the memory_* tools (mcp 1.x & 2.x), stdio + HTTP
+│   ├── auth.py         writer identity, bearer-token resolution
+│   ├── journal.py      append-only audit journal (journal/events.jsonl)
+│   ├── gateway.py      JSON/HTTP adapter for non-MCP agents
 │   └── cli.py          same operations for humans, sync hooks, and session hooks
-├── tests/test_pipeline.py      offline suite (22 tests)
+├── tests/test_pipeline.py      offline suite: core engine
+├── tests/test_identity.py      identity, HTTP auth, journal, hammer tests
 ├── tests/live_stdio_check.py   real MCP client <-> server round trip
 ├── config.example.toml
 ├── pyproject.toml
@@ -253,6 +257,56 @@ Notes that matter:
 
 ---
 
+## Many writers: identity, HTTP transport, audit journal
+
+With more than one agent writing, *who wrote this* matters more than anything
+else in a memory. Every memory records its `writer` (a stable id such as
+`owner`, `claude-code`, or `grok-sales-1`), and every mutation is appended to
+`journal/events.jsonl`.
+
+**Declare your writers** in `config.toml` (tiers: 0 untrusted, 1 standard,
+2 senior, 3 owner; anyone not listed is tier 0):
+
+```toml
+[writers]
+owner        = { tier = 3 }
+claude-code  = { tier = 2 }
+grok-sales-1 = { tier = 1 }
+```
+
+**Local use (stdio / CLI)** runs as `MNEMOSYNE_WRITER` (default `owner`).
+
+**Several agents at once: MCP over HTTP.** Give each writer a token in the
+environment (never in a file) and start the server:
+
+```bash
+export MNEMOSYNE_TOKEN_CLAUDE_CODE="$(openssl rand -hex 32)"
+export MNEMOSYNE_TOKEN_GROK_SALES_1="$(openssl rand -hex 32)"
+mnemosyne-server --http --host 127.0.0.1 --port 8787     # MCP at /mcp
+```
+
+Each request must send `Authorization: Bearer <token>`; the token decides the
+writer, and an unknown or missing token gets `401` before anything touches the
+store. Keep it on localhost or behind a TLS proxy.
+
+**Agents that can't speak MCP** use the JSON gateway (same tokens, no logic of
+its own):
+
+```bash
+mnemosyne-gateway --port 8788
+curl -s localhost:8788/remember -H "Authorization: Bearer $MNEMOSYNE_TOKEN_GROK_SALES_1" \
+     -d '{"text": "Initech asked for a demo next week.", "type": "episodic"}'
+```
+
+Routes: `POST /remember`, `POST /recall`, `POST /update`, `GET /health`.
+
+**The journal.** `journal/events.jsonl` is canonical and syncs with `notes/`.
+Each line is `{ts, writer, op, memory_id, content_hash, meta_hash, state}`
+for every remember, update, forget, reflect edit, and counter flush. Replaying
+it reproduces the notes; `mnemosyne journal -n 20` shows the latest events.
+
+---
+
 ## Local + remote sync (seamless, and you own it)
 
 Because the canonical layer is plain text and the index is disposable, sync is
@@ -260,7 +314,7 @@ simple and robust:
 
 ```bash
 cd ~/mnemosyne
-git init && git add notes archive config.example.toml && git commit -m "memory"
+git init && git add notes archive journal config.example.toml && git commit -m "memory"
 git remote add origin <your private repo>
 git push -u origin main
 ```

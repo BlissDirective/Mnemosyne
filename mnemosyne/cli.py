@@ -9,6 +9,9 @@ Claude Code SessionStart hook).
     python -m mnemosyne.cli stats
     python -m mnemosyne.cli reindex [--force]
     python -m mnemosyne.cli prime [query]
+    python -m mnemosyne.cli journal [-n 20]
+
+Runs as the writer in MNEMOSYNE_WRITER (default "owner").
 """
 
 from __future__ import annotations
@@ -70,6 +73,9 @@ def main(argv=None) -> int:
                     help="optional topic to recall; omitted = best standing context")
     pr.add_argument("-k", type=int, default=10)
 
+    jr = sub.add_parser("journal", help="show the latest audit-journal events")
+    jr.add_argument("-n", type=int, default=20, help="how many events (newest last)")
+
     args = p.parse_args(argv)
 
     from .config import load_config
@@ -94,7 +100,7 @@ def main(argv=None) -> int:
     if args.cmd == "remember":
         mem = engine.remember(args.text, type=args.type, entities=args.entities,
                               tags=args.tags, source=args.source, confidence=args.confidence)
-        print(f"stored {mem.id} [{mem.type.value}]")
+        print(f"stored {mem.id} [{mem.type.value}] writer={mem.writer}")
     elif args.cmd == "recall":
         hits = engine.recall(args.query, k=args.k, types=args.types or None,
                              include_superseded=args.include_superseded)
@@ -102,7 +108,8 @@ def main(argv=None) -> int:
             print("(no matches)")
         for h in hits:
             print(f"[{h.memory.type.value}] {h.memory.text}")
-            print(f"    id={h.memory.id} score={h.score:.4f} via={'+'.join(h.strategies)}")
+            print(f"    id={h.memory.id} writer={h.memory.writer} "
+                  f"score={h.score:.4f} via={'+'.join(h.strategies)}")
     elif args.cmd == "update":
         mem = engine.update(args.id, text=args.text, type=args.type,
                             entities=args.entities, tags=args.tags,
@@ -118,6 +125,10 @@ def main(argv=None) -> int:
         print(json.dumps(engine.sync(force=args.force), indent=2))
     elif args.cmd == "forget":
         print("deleted" if engine.forget(args.id) else "not found")
+    elif args.cmd == "journal":
+        events = list(engine.journal.events())
+        for ev in events[-args.n:] if args.n > 0 else events:
+            print(f"{ev['ts']}  {ev['writer']:<16} {ev['op']:<10} {ev.get('memory_id') or ''}")
 
     engine.close()
     return 0

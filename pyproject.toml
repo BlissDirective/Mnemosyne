@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemosyne-memory"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local-first, portable, evolutionary memory engine for AI agents (MCP)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,7 @@ local = ["sentence-transformers>=3.0"]   # optional local embedding models (e.g.
 [project.scripts]
 mnemosyne = "mnemosyne.cli:main"
 mnemosyne-server = "mnemosyne.server:main"
+mnemosyne-gateway = "mnemosyne.gateway:main"
 
 [tool.setuptools.packages.find]
 include = ["mnemosyne*"]

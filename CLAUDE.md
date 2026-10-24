@@ -98,11 +98,18 @@ duplicates and expired world_facts are filtered from results by default.
 (index bumped immediately, canonical write-back batched), and `prime()`;
 `server.py` is the MCP surface; `cli.py` mirrors it for humans and hooks.
 
+**Identity & audit (v0.4):** every memory has a `writer` (its author); every
+engine operation runs as a writer (`writer=` argument, else `MNEMOSYNE_WRITER`,
+else `owner`). Over HTTP (`server.py --http`, `gateway.py`) the bearer token
+decides the writer via `auth.resolve_token`; unknown tokens are rejected before
+any engine call. Every mutation appends to `journal/events.jsonl`
+(`journal.py`) *before* the store write.
+
 **Setup & tests:**
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-python -m pytest -q                   # offline, no API key (22 tests)
+python -m pytest -q                   # offline, no API key
 python tests/live_stdio_check.py      # spawns the real server over stdio
 ```
 
@@ -146,10 +153,17 @@ python tests/live_stdio_check.py      # spawns the real server over stdio
   handles legacy absolute paths.
 - Don't commit `.index/` or `config.toml` (see `.gitignore`). Secrets live in
   env vars (`OPENAI_API_KEY`, `VOYAGE_API_KEY`), never in files.
+- Every code path that writes a memory file goes through the engine and
+  appends a journal event (with the full `state`) first — including reflect's
+  edits (`persist` hook) and counter flushes. Replaying the journal must
+  reproduce `notes/` (tested). Never rewrite or truncate the journal.
+- The engine is serialized by one `RLock`; store writes are atomic
+  (temp file + rename). Keep the hammer tests in `tests/test_identity.py` green.
+- Tokens live only in `MNEMOSYNE_TOKEN_<WRITER>` env vars, never in files.
 - MCP tool contract: snake_case `memory_*` names, Pydantic input models,
   accurate `readOnlyHint`/`destructiveHint` annotations, actionable error strings.
 
-**Sync model:** `git` (or a file-sync folder) carries `notes/` + `archive/`;
+**Sync model:** `git` (or a file-sync folder) carries `notes/` + `archive/` + `journal/`;
 each device rebuilds its own `.index/` with `mnemosyne reindex`.
 
 ---

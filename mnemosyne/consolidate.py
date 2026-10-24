@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -68,6 +68,10 @@ def _write_through(store: MarkdownStore, index: MemoryIndex, mem: Memory) -> Non
     index.update_meta(mem)
 
 
+# persist hook: the engine passes one that also journals the change
+Persist = Callable[[Memory], None]
+
+
 def _pairs_above(matrix: np.ndarray, threshold: float) -> List[Tuple[int, int, float]]:
     """All (i, j, sim) with i < j and cosine >= threshold, computed block-wise so
     peak memory is O(block * n) instead of O(n^2)."""
@@ -100,8 +104,12 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
             dedup_threshold: float = 0.94,
             decay: float = 0.0,
             decay_min_age_days: int = 30,
-            dry_run: bool = False) -> ReflectReport:
+            dry_run: bool = False,
+            persist: Optional[Persist] = None) -> ReflectReport:
     report = ReflectReport()
+    if persist is None:
+        def persist(mem: Memory) -> None:
+            _write_through(store, index, mem)
     ids, matrix = index.all_vectors()
     if matrix.shape[0] < 2:
         report.notes.append("Not enough memories to consolidate yet.")
@@ -164,7 +172,7 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
         for dup_id in cluster_ids[1:]:
             if dup_id not in surv.links:
                 surv.links.append(dup_id)
-        _write_through(store, index, surv)
+        persist(surv)
         report.reinforced.append(survivor_id)
 
         for dup_id in cluster_ids[1:]:
@@ -173,7 +181,7 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
                 dup.duplicate_of = survivor_id
                 if survivor_id not in dup.links:
                     dup.links.append(survivor_id)
-                _write_through(store, index, dup)
+                persist(dup)
 
     # reinforce (non-duplicate) close neighbors: corroboration without merging
     if not dry_run:
@@ -186,7 +194,7 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
                 m = store.read_by_id(mid)
                 if m and m.confidence < 0.95:
                     m.confidence = round(min(0.95, m.confidence + 0.02 * int(counts[i])), 3)
-                    _write_through(store, index, m)
+                    persist(m)
                     report.reinforced.append(mid)
 
     # optional decay — access-gated: only stale (neither updated nor recalled
@@ -202,7 +210,7 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
             last_activity = max(m.updated or "", m.last_recalled or "")
             if last_activity < cutoff_iso:
                 m.confidence = round(max(0.2, m.confidence - decay), 3)
-                _write_through(store, index, m)
+                persist(m)
                 report.decayed.append(ids[i])
 
     return report

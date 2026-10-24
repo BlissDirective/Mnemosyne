@@ -74,7 +74,8 @@ class Memory:
     updated: str = field(default_factory=utcnow_iso)
     entities: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
-    source: str = "manual"
+    source: str = "manual"                # channel: conversation / cli / import ...
+    writer: str = "owner"                 # stable id of WHO wrote it (agent or human)
     confidence: float = 0.7
     valid_from: Optional[str] = None      # temporal validity (world facts)
     valid_to: Optional[str] = None
@@ -101,6 +102,7 @@ class Memory:
                 "type": self.type.value,
                 "updated": self.updated,
                 "source": self.source,
+                "writer": self.writer,
                 "confidence": self.confidence,
                 "valid_from": self.valid_from,
                 "valid_to": self.valid_to,

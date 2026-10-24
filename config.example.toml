@@ -35,3 +35,19 @@ dedup_threshold    = 0.94  # cosine >= this (same type) => treated as near-dupli
 decay_per_reflect  = 0.0   # >0 slowly lowers confidence of stale, unlinked memories
 decay_min_age_days = 30    # decay-eligible only if neither updated nor recalled
                            # within this many days (recalled memories never fade)
+
+[writers]
+# Who may write, and how much they are trusted. Tokens are NEVER stored here:
+# each writer's bearer token lives in the env var MNEMOSYNE_TOKEN_<WRITER>
+# (upper-cased, non-alphanumerics -> "_"), e.g. MNEMOSYNE_TOKEN_GROK_SALES_1.
+# tier: 0 untrusted · 1 standard · 2 senior · 3 owner. Unlisted writers are
+# treated as tier 0. Local stdio/CLI use runs as MNEMOSYNE_WRITER (default owner).
+owner        = { tier = 3 }
+# claude-code  = { tier = 2 }
+# grok-sales-1 = { tier = 1 }
+
+[http]
+# `mnemosyne-server --http` serves MCP (streamable HTTP) at http://host:port/mcp;
+# every request must carry `Authorization: Bearer <token>`.
+host = "127.0.0.1"
+port = 8787
