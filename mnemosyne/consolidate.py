@@ -89,14 +89,17 @@ def _pairs_above(matrix: np.ndarray, threshold: float) -> List[Tuple[int, int, f
     return out
 
 
-def _neighbor_counts(matrix: np.ndarray, threshold: float) -> np.ndarray:
-    """Per-row count of *other* rows with cosine >= threshold, block-wise."""
+def _neighbor_counts(matrix: np.ndarray, threshold: float,
+                     groups: np.ndarray) -> np.ndarray:
+    """Per-row count of *other* rows in the same group (ring) with cosine >=
+    threshold, block-wise."""
     n = matrix.shape[0]
     counts = np.zeros(n, dtype=np.int64)
     for start in range(0, n, _SIM_BLOCK):
         end = min(start + _SIM_BLOCK, n)
         block = matrix[start:end] @ matrix.T
-        counts[start:end] = np.sum(block >= threshold, axis=1) - 1  # exclude self
+        same = groups[start:end, None] == groups[None, :]
+        counts[start:end] = np.sum((block >= threshold) & same, axis=1) - 1  # exclude self
     return counts
 
 
@@ -115,12 +118,19 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
         report.notes.append("Not enough memories to consolidate yet.")
         return report
 
-    # id -> (type, confidence, created) for grouping/updating
-    meta: Dict[str, Tuple[str, float, str]] = {}
+    # id -> (type, confidence, created, ring) for grouping/updating. Rings
+    # never mix: a private note must not dedup against (and hide) a canon
+    # memory, nor corroborate it — that would let low-trust writers move
+    # shared truth just by repeating themselves in their own notebook.
+    meta: Dict[str, Tuple[str, float, str, str]] = {}
     for mid in ids:
         row = index.get_meta(mid)
         if row:
-            meta[mid] = (row["type"], float(row["confidence"] or 0.7), row["created"])
+            meta[mid] = (row["type"], float(row["confidence"] or 0.7), row["created"],
+                         row["ring"] or "canon")
+    ring_codes = {r: i for i, r in enumerate(sorted({m[3] for m in meta.values()}))}
+    groups = np.array([ring_codes.get(meta.get(mid, ("", 0, "", ""))[3], -1)
+                       for mid in ids], dtype=np.int64)
 
     n = len(ids)
     parent = list(range(n))  # union-find for clustering duplicates
@@ -138,10 +148,10 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
 
     reinforced_set = set()
     for i, j, _sim in _pairs_above(matrix, dedup_threshold):
-        ti = meta.get(ids[i], ("", 0, ""))[0]
-        tj = meta.get(ids[j], ("", 0, ""))[0]
-        if ti != tj:
-            continue  # only merge like-with-like
+        ti = meta.get(ids[i], ("", 0, "", ""))
+        tj = meta.get(ids[j], ("", 0, "", ""))
+        if ti[0] != tj[0] or ti[3] != tj[3]:
+            continue  # only merge like-with-like, within one ring
         union(i, j)
         reinforced_set.add(ids[i])
         reinforced_set.add(ids[j])
@@ -185,7 +195,7 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
 
     # reinforce (non-duplicate) close neighbors: corroboration without merging
     if not dry_run:
-        counts = _neighbor_counts(matrix, dedup_threshold - 0.1)
+        counts = _neighbor_counts(matrix, dedup_threshold - 0.1, groups)
         for i in range(n):
             mid = ids[i]
             if mid in report.reinforced or mid in reinforced_set:

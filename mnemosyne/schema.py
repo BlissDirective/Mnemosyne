@@ -84,6 +84,14 @@ class Memory:
     archive_ref: Optional[str] = None     # path to verbatim source (relative to root)
     recall_count: int = 0                 # access counter: times returned by recall
     last_recalled: Optional[str] = None   # access counter: ISO timestamp of last recall
+    # rings & review (see rings.py). Files written before rings existed were
+    # the owner's single-user truth, so a missing ring reads as canon.
+    ring: str = "canon"
+    proposed_by: Optional[str] = None     # who put it in the review queue
+    proposed_target: Optional[str] = None # ring it should land in if promoted
+    proposed_from: Optional[str] = None   # id it was copied from (memory_propose by id)
+    promoted_by: Optional[str] = None     # reviewer who promoted it
+    promoted_at: Optional[str] = None
 
     # ---- convenience -----------------------------------------------------
     @property
@@ -112,6 +120,12 @@ class Memory:
                 "duplicate_of": self.duplicate_of,
                 "recall_count": self.recall_count,
                 "last_recalled": self.last_recalled,
+                "ring": self.ring,
+                "proposed_by": self.proposed_by,
+                "proposed_target": self.proposed_target,
+                "proposed_from": self.proposed_from,
+                "promoted_by": self.promoted_by,
+                "promoted_at": self.promoted_at,
             },
             sort_keys=True,
         )
@@ -135,7 +149,9 @@ class Memory:
         for k in ("entities", "tags", "links"):
             if not d[k]:
                 d.pop(k)
-        for k in ("valid_from", "valid_to", "duplicate_of", "archive_ref", "last_recalled"):
+        for k in ("valid_from", "valid_to", "duplicate_of", "archive_ref", "last_recalled",
+                  "proposed_by", "proposed_target", "proposed_from", "promoted_by",
+                  "promoted_at"):
             if d[k] is None:
                 d.pop(k)
         if not d.get("recall_count"):

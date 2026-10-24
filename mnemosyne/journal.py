@@ -25,7 +25,8 @@ from typing import Any, Dict, Iterator, Optional
 from .schema import Memory, MemoryType, utcnow_iso
 
 # ops that leave the memory present on disk (and so carry `state`)
-STATE_OPS = {"remember", "update", "reflect", "access"}
+STATE_OPS = {"remember", "update", "reflect", "access",
+             "propose", "promote", "reject", "supersede"}
 DELETE_OPS = {"forget"}
 
 

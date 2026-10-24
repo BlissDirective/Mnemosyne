@@ -50,6 +50,14 @@ Follow this whenever the `memory_*` MCP tools are connected (see README →
   `memory_forget` the rest. (Reflect's own changes propagate to the index
   automatically, and its decay never touches memories that were updated or
   recalled recently.)
+- **Mind the ring.** Writes go to your private ring by default. Pass
+  `ring="canon"` (or `team:<name>`) for things the whole organization should
+  know. Below tier 2 that write is quarantined in `proposed` until a senior
+  writer promotes it. That is expected; don't retry or work around it. To
+  change a canon memory you can't edit, call `memory_propose` with its `id` and
+  the corrected `text`. Reviewers: work the queue (`memory_recall
+  scope=["proposed"]`, then `memory_promote` / `memory_reject` with a reason)
+  and never promote your own proposals.
 - **Forget what's wrong.** Use `memory_forget` (by id from a recall result) to
   delete incorrect memories. It is destructive — confirm the id first.
 - **Reindex after out-of-band changes.** Run `memory_reindex` after editing
@@ -104,6 +112,12 @@ else `owner`). Over HTTP (`server.py --http`, `gateway.py`) the bearer token
 decides the writer via `auth.resolve_token`; unknown tokens are rejected before
 any engine call. Every mutation appends to `journal/events.jsonl`
 (`journal.py`) *before* the store write.
+
+**Rings (v0.5):** `rings.py` holds the whole access policy (who may read and
+write which ring, quarantine, scope resolution); the engine calls it on every
+remember/update/forget/recall/promote. The ring is in frontmatter (canonical)
+and mirrored by the directory under `notes/`. Reflect works within one ring
+only.
 
 **Setup & tests:**
 ```bash
@@ -160,6 +174,9 @@ python tests/live_stdio_check.py      # spawns the real server over stdio
 - The engine is serialized by one `RLock`; store writes are atomic
   (temp file + rename). Keep the hammer tests in `tests/test_identity.py` green.
 - Tokens live only in `MNEMOSYNE_TOKEN_<WRITER>` env vars, never in files.
+- Access rules live in `rings.py` and nowhere else. A new operation that
+  reads or writes memories must go through `rings.resolve_scope` /
+  `write_decision` / `check_can_modify`. Fail closed: unknown writers are tier 0.
 - MCP tool contract: snake_case `memory_*` names, Pydantic input models,
   accurate `readOnlyHint`/`destructiveHint` annotations, actionable error strings.
 
@@ -180,6 +197,11 @@ mnemosyne stats
 mnemosyne reindex  [--force]
 mnemosyne forget   <memory-id>
 mnemosyne prime    [topic]        # session-start context block (hook-safe)
+mnemosyne remember "…" --ring canon            # quarantined below tier 2
+mnemosyne recall   "…" --scope all             # every ring you may read
+mnemosyne queue                                # proposals awaiting review
+mnemosyne promote  <id>  |  reject <id> --reason "…"
+mnemosyne journal  -n 20                       # latest audit events
 ```
 
 > Placement: keep this file at the repo root to guide work *on* Mnemosyne. To

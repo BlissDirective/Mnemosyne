@@ -11,6 +11,12 @@ Code) can persist and retrieve memory across sessions:
     memory_forget     delete a memory by id
     memory_stats      counts, embedding-model coverage, re-embed backlog
     memory_reindex    rebuild the derived index from the canonical notes
+    memory_propose    put a memory up for review (the organizational merge request)
+    memory_promote    reviewer: move a proposal into canon / a team ring
+    memory_reject     reviewer: send a proposal back with a reason
+
+Rings (see rings.py): private:<writer> | team:<name> | proposed | canon.
+Low-trust writers' shared writes are quarantined into `proposed`.
 
 Run (stdio):  python -m mnemosyne.server
          (identity: MNEMOSYNE_WRITER, default "owner")
@@ -105,6 +111,11 @@ class RememberInput(BaseModel):
     archive_text: Optional[str] = Field(default=None, max_length=200000,
                                         description="Optional raw source (e.g. transcript excerpt) to "
                                                     "store verbatim in the archive, unsummarized.")
+    ring: Optional[str] = Field(default=None,
+                                description="Where to store it: 'canon', 'team:<name>', 'proposed' or "
+                                            "'private:<you>'. Default: your private ring. Writers "
+                                            "below tier 2 aiming at a shared ring are quarantined "
+                                            "into 'proposed' for review.")
 
 
 class RecallInput(BaseModel):
@@ -121,6 +132,10 @@ class RecallInput(BaseModel):
         default=False,
         description="If true, also return memories marked duplicate_of by reflect() "
                     "and world_facts past their valid_to. Default hides them.")
+    scope: List[str] = Field(default_factory=list,
+                             description="Rings to search. Empty = canon + your private ring + "
+                                         "your teams. 'all' = every ring you may read. "
+                                         "Reviewers can pass ['proposed'].")
 
 
 class UpdateInput(BaseModel):
@@ -143,6 +158,40 @@ class UpdateInput(BaseModel):
                                     description="New valid_to ISO date (marks a world_fact as "
                                                 "no longer true after that date); pass \"\" to clear it.")
     source: Optional[str] = Field(default=None, description="New source label.")
+
+
+class ProposeInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    id: Optional[str] = Field(default=None, min_length=3,
+                              description="Copy this existing memory into the review queue "
+                                          "(e.g. share a private note, or suggest a correction "
+                                          "to a canon memory by also passing `text`).")
+    text: Optional[str] = Field(default=None, min_length=1, max_length=8000,
+                                description="Text of a new proposal, or the corrected text when "
+                                            "proposing a change to `id`.")
+    type: Optional[str] = Field(default=None, description=f"One of: {_TYPES}.")
+    entities: Optional[List[str]] = Field(default=None, max_length=32)
+    tags: Optional[List[str]] = Field(default=None, max_length=32)
+    target: str = Field(default="canon",
+                        description="Ring it should land in if promoted: 'canon' or 'team:<name>'.")
+
+
+class PromoteInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    id: str = Field(..., min_length=3, description="The proposal's id.")
+    target: Optional[str] = Field(default=None,
+                                  description="Override the proposal's target ring "
+                                              "('canon' or 'team:<name>').")
+
+
+class RejectInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    id: str = Field(..., min_length=3, description="The proposal's id.")
+    reason: str = Field(..., min_length=3, max_length=500,
+                        description="Why it was rejected; recorded on the memory as a tag.")
 
 
 class ReflectInput(BaseModel):
@@ -178,7 +227,8 @@ def _format_hits(hits: List[Hit]) -> str:
         m = h.memory
         via = "+".join(h.strategies)
         head = f"- [{m.type.value}] {m.text}"
-        meta = f"    id={m.id} · writer={m.writer} · confidence={m.confidence} · via={via}"
+        meta = (f"    id={m.id} · ring={m.ring} · writer={m.writer} · "
+                f"confidence={m.confidence} · via={via}")
         if m.entities:
             meta += f" · entities={', '.join(m.entities)}"
         if m.valid_from or m.valid_to:
@@ -209,10 +259,15 @@ def memory_remember(params: RememberInput) -> str:
             text=params.text, type=params.type, entities=params.entities,
             tags=params.tags, source=params.source, confidence=params.confidence,
             valid_from=params.valid_from, valid_to=params.valid_to,
-            archive_text=params.archive_text, writer=caller(),
+            archive_text=params.archive_text, writer=caller(), ring=params.ring,
         )
-        return json.dumps({"status": "ok", "id": mem.id, "type": mem.type.value,
-                           "writer": mem.writer, "stored": mem.text}, indent=2)
+        out = {"status": "ok", "id": mem.id, "type": mem.type.value,
+               "writer": mem.writer, "ring": mem.ring, "stored": mem.text}
+        if mem.ring == "proposed" and (params.ring or "").lower() != "proposed":
+            out["status"] = "quarantined"
+            out["note"] = (f"Your tier cannot write {mem.proposed_target} directly; the "
+                           "memory is in the review queue until a senior writer promotes it.")
+        return json.dumps(out, indent=2)
     except Exception as e:
         return f"Error storing memory: {type(e).__name__}: {e}"
 
@@ -238,7 +293,8 @@ def memory_recall(params: RecallInput) -> str:
         hits = engine().recall(
             params.query, k=params.k,
             types=params.types or None, entities=params.entities or None,
-            include_superseded=params.include_superseded, writer=caller())
+            include_superseded=params.include_superseded, writer=caller(),
+            scope=params.scope or None)
         return _format_hits(hits)
     except Exception as e:
         return f"Error during recall: {type(e).__name__}: {e}"
@@ -275,6 +331,65 @@ def memory_update(params: UpdateInput) -> str:
                            "updated": mem.updated, "text": mem.text}, indent=2)
     except Exception as e:
         return f"Error updating memory: {type(e).__name__}: {e}"
+
+
+@mcp.tool(
+    name="memory_propose",
+    annotations={"title": "Propose for review", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def memory_propose(params: ProposeInput) -> str:
+    """Put a memory up for review — the organizational merge request.
+
+    Pass `id` to copy an existing memory you can read (e.g. promote something
+    from your private notebook to shared truth, or pass `id` + corrected
+    `text` to suggest a fix to a canon memory you cannot edit). Or pass `text`
+    (+ type/entities/tags) for a brand-new proposal. It lands in the
+    `proposed` ring, invisible to default recall, until a different senior
+    writer promotes it with memory_promote. Returns the proposal's id."""
+    try:
+        mem = engine().propose(params.id, text=params.text, target=params.target,
+                               writer=caller(), type=params.type,
+                               entities=params.entities, tags=params.tags)
+        return json.dumps({"status": "ok", "id": mem.id, "ring": mem.ring,
+                           "target": mem.proposed_target, "proposed_by": mem.proposed_by},
+                          indent=2)
+    except Exception as e:
+        return f"Error proposing memory: {type(e).__name__}: {e}"
+
+
+@mcp.tool(
+    name="memory_promote",
+    annotations={"title": "Promote proposal", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def memory_promote(params: PromoteInput) -> str:
+    """Reviewer action: move a proposal into canon (or a team ring). Needs
+    tier >= 2, and you cannot promote your own proposal. If the proposal was a
+    corrected copy of a memory already in that ring, the original is marked
+    superseded. Logged in the journal."""
+    try:
+        mem = engine().promote(params.id, target=params.target, writer=caller())
+        return json.dumps({"status": "ok", "id": mem.id, "ring": mem.ring,
+                           "promoted_by": mem.promoted_by}, indent=2)
+    except Exception as e:
+        return f"Error promoting memory: {type(e).__name__}: {e}"
+
+
+@mcp.tool(
+    name="memory_reject",
+    annotations={"title": "Reject proposal", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def memory_reject(params: RejectInput) -> str:
+    """Reviewer action: send a proposal back to its proposer's private ring,
+    with the reason recorded as a tag. Needs tier >= 2 (or the proposer,
+    withdrawing their own proposal). Logged in the journal."""
+    try:
+        mem = engine().reject(params.id, params.reason, writer=caller())
+        return json.dumps({"status": "ok", "id": mem.id, "ring": mem.ring}, indent=2)
+    except Exception as e:
+        return f"Error rejecting memory: {type(e).__name__}: {e}"
 
 
 @mcp.tool(

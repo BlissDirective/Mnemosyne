@@ -29,7 +29,8 @@ async def main() -> int:
             assert names == sorted([
                 "memory_remember", "memory_recall", "memory_update",
                 "memory_reflect", "memory_forget", "memory_stats",
-                "memory_reindex",
+                "memory_reindex", "memory_propose", "memory_promote",
+                "memory_reject",
             ]), names
 
             upd = next(t for t in tools.tools if t.name == "memory_update")
@@ -38,7 +39,7 @@ async def main() -> int:
 
             r = await session.call_tool("memory_remember", {
                 "params": {"text": "Alice works at Initech.", "type": "world_fact",
-                           "entities": ["Alice"]}})
+                           "entities": ["Alice"], "ring": "canon"}})
             payload = json.loads(r.content[0].text)
             assert payload["status"] == "ok", payload
             mem_id = payload["id"]

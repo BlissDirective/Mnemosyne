@@ -21,7 +21,7 @@ import hmac
 import os
 import re
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Tuple
 
 from .config import Config
 
@@ -32,6 +32,7 @@ _WRITER_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 class Identity:
     writer: str
     tier: int
+    teams: Tuple[str, ...] = ()
 
 
 def valid_writer_id(writer: str) -> bool:
@@ -45,7 +46,9 @@ def token_env_name(writer: str) -> str:
 def identity_for(cfg: Config, writer: str) -> Identity:
     """The identity a local (stdio/CLI) caller runs as. Unknown writers get
     tier 0 — fail closed for writes."""
-    return Identity(writer=writer, tier=cfg.tier_of(writer))
+    spec = cfg.writers.get(writer)
+    return Identity(writer=writer, tier=cfg.tier_of(writer),
+                    teams=tuple(spec.teams) if spec else ())
 
 
 def resolve_token(cfg: Config, token: Optional[str],

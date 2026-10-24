@@ -68,11 +68,13 @@ mnemosyne/
 │   ├── engine.py       update-in-place, access counters, prime(); wires it all
 │   ├── server.py       FastMCP/MCPServer: the memory_* tools (mcp 1.x & 2.x), stdio + HTTP
 │   ├── auth.py         writer identity, bearer-token resolution
+│   ├── rings.py        ring access policy (private / team / proposed / canon)
 │   ├── journal.py      append-only audit journal (journal/events.jsonl)
 │   ├── gateway.py      JSON/HTTP adapter for non-MCP agents
 │   └── cli.py          same operations for humans, sync hooks, and session hooks
 ├── tests/test_pipeline.py      offline suite: core engine
 ├── tests/test_identity.py      identity, HTTP auth, journal, hammer tests
+├── tests/test_rings.py         rings, quarantine, promotion workflow
 ├── tests/live_stdio_check.py   real MCP client <-> server round trip
 ├── config.example.toml
 ├── pyproject.toml
@@ -254,6 +256,52 @@ Notes that matter:
   problem can never block a session from starting.
 - Cloud sessions don't read your local `~/.claude/settings.json`; this hook is
   for Claude Code running on your machine.
+
+---
+
+## Rings: private notebooks, team memory, a reviewed canon
+
+Every memory lives in a **ring**, and the folder layout mirrors it:
+
+```
+notes/canon/                reviewed organizational truth
+notes/proposed/             the review queue (quarantine)
+notes/team/<name>/          shared by a team, e.g. team:sales
+notes/private/<writer>/     one agent's working notebook
+```
+
+| | write | read |
+|---|---|---|
+| `private:<you>` | you | you (and the owner, tier 3) |
+| `team:<name>` | tier ≥ 2, or a tier-1 member | members, tier ≥ 2 |
+| `proposed` | anyone | reviewers (tier ≥ 2) |
+| `canon` | tier ≥ 2 | everyone |
+
+A write goes to the writer's private ring unless `ring` says otherwise. When a
+writer below tier 2 aims at `canon` or another team's ring, the write is
+**quarantined**: it lands in `proposed` with its intended ring recorded, and
+default recall cannot see it. It becomes shared truth only when a
+**different** writer of tier ≥ 2 promotes it:
+
+```bash
+MNEMOSYNE_WRITER=grok-sales-1 mnemosyne remember "Refunds take 60 days." --ring canon
+#   -> stored … ring=proposed (quarantined for review)
+MNEMOSYNE_WRITER=claude-code mnemosyne queue                # the review queue
+MNEMOSYNE_WRITER=claude-code mnemosyne promote <id>         # or: reject <id> --reason "…"
+```
+
+`memory_propose` is the organizational merge request. Use it to share a
+private note (`id`), to suggest a fix to a canon memory you cannot edit
+(`id` + corrected `text`), or to submit something new. When a corrected copy is
+promoted, the original is marked superseded. Reviewers see the queue depth and
+the oldest proposals in every `prime`.
+
+Team membership is declared on the writer:
+`grok-sales-1 = { tier = 1, teams = ["sales"] }`. Recall searches canon, your
+private ring, and your teams by default. Pass `scope` (`["team:ops"]`,
+`["proposed"]`, `["all"]`) to search further, within what your tier may read.
+`reflect` never merges or corroborates across rings, so an agent repeating
+itself in its private ring cannot move canon.
 
 ---
 

@@ -8,7 +8,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 # Trust tiers (who may write what is enforced from Phase 2 on; Phase 1 records
@@ -20,6 +20,7 @@ TIER_UNTRUSTED, TIER_STANDARD, TIER_SENIOR, TIER_OWNER = 0, 1, 2, 3
 @dataclass
 class WriterSpec:
     tier: int = TIER_STANDARD
+    teams: List[str] = field(default_factory=list)   # team rings it belongs to
 
 
 def _default_writers() -> Dict[str, WriterSpec]:
@@ -156,5 +157,8 @@ def _parse_writers(raw: Dict[str, Any]) -> Dict[str, WriterSpec]:
         tier = int(spec.get("tier", TIER_STANDARD))
         if not TIER_UNTRUSTED <= tier <= TIER_OWNER:
             raise ValueError(f"[writers] {writer}: tier must be 0-3, got {tier}")
-        out[writer] = WriterSpec(tier=tier)
+        teams = spec.get("teams", [])
+        if isinstance(teams, str):
+            teams = [teams]
+        out[writer] = WriterSpec(tier=tier, teams=[str(t).strip().lower() for t in teams])
     return out

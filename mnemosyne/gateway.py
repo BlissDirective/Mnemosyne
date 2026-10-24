@@ -3,8 +3,8 @@ Grok bot framework). It is an adapter only: every route maps 1:1 onto an
 engine call, with the same bearer-token auth as the MCP HTTP transport, and no
 logic lives here.
 
-    POST /remember   {"text": ..., "type": ..., "entities": [...], ...}
-    POST /recall     {"query": ..., "k": 8, "types": [...], "entities": [...]}
+    POST /remember   {"text": ..., "type": ..., "entities": [...], "ring": ..., ...}
+    POST /recall     {"query": ..., "k": 8, "types": [...], "entities": [...], "scope": [...]}
     POST /update     {"id": ..., "text": ..., "confidence": ..., ...}
     GET  /health     (no auth; returns {"status": "ok"})
 
@@ -29,8 +29,8 @@ from .retrieval import Hit
 MAX_BODY = 1_000_000  # bytes
 
 _REMEMBER_KEYS = {"text", "type", "entities", "tags", "source", "confidence",
-                  "valid_from", "valid_to", "archive_text"}
-_RECALL_KEYS = {"query", "k", "types", "entities", "include_superseded"}
+                  "valid_from", "valid_to", "archive_text", "ring"}
+_RECALL_KEYS = {"query", "k", "types", "entities", "include_superseded", "scope"}
 _UPDATE_KEYS = {"id", "text", "type", "entities", "tags", "confidence",
                 "valid_from", "valid_to", "source"}
 
@@ -54,7 +54,8 @@ def _pick(body: Dict[str, Any], allowed: set, required: tuple) -> Dict[str, Any]
 
 def _hit_json(h: Hit) -> Dict[str, Any]:
     return {"id": h.memory.id, "type": h.memory.type.value, "text": h.memory.text,
-            "writer": h.memory.writer, "confidence": h.memory.confidence,
+            "writer": h.memory.writer, "ring": h.memory.ring,
+            "confidence": h.memory.confidence,
             "entities": h.memory.entities, "score": round(h.score, 6),
             "via": h.strategies}
 
@@ -64,7 +65,8 @@ def make_routes(eng: MemoryEngine) -> Dict[str, Callable[[Identity, Dict[str, An
         args = _pick(body, _REMEMBER_KEYS, ("text",))
         mem = eng.remember(writer=ident.writer, **args)
         return {"status": "ok", "id": mem.id, "type": mem.type.value,
-                "writer": mem.writer}
+                "writer": mem.writer, "ring": mem.ring,
+                "quarantined": mem.ring == "proposed" and args.get("ring") != "proposed"}
 
     def recall(ident: Identity, body: Dict[str, Any]) -> Dict:
         args = _pick(body, _RECALL_KEYS, ("query",))

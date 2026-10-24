@@ -87,7 +87,10 @@ class Retriever:
                types: Optional[Sequence[str]] = None,
                entities: Optional[Sequence[str]] = None,
                use_recency: Optional[bool] = None,
-               include_superseded: bool = False) -> List[Hit]:
+               include_superseded: bool = False,
+               rings: Optional[Sequence[str]] = None) -> List[Hit]:
+        """`rings` restricts every strategy to those rings (None = no ring
+        filter; the engine always passes the caller's resolved scope)."""
         ck = self.candidate_k
         ranked: Dict[str, List[str]] = {}
 
@@ -95,24 +98,24 @@ class Retriever:
         #    (Voyage) embed them as queries, not documents
         try:
             qv = self.provider.embed_query(query)
-            sem = self.index.semantic(qv, ck, types=types)
+            sem = self.index.semantic(qv, ck, types=types, rings=rings)
             ranked["semantic"] = [mid for mid, _ in sem]
         except Exception:
             ranked["semantic"] = []  # e.g. no API key -> degrade to keyword/graph
 
         # 2) keyword / BM25
-        ranked["keyword"] = [mid for mid, _ in self.index.keyword(query, ck)]
+        ranked["keyword"] = [mid for mid, _ in self.index.keyword(query, ck, rings=rings)]
 
         # 3) graph expansion (entities the caller flagged, or words in the query)
         ents = list(entities) if entities else _guess_entities(query)
         if ents:
-            ranked["graph"] = [mid for mid, _ in self.index.graph(ents, ck)]
+            ranked["graph"] = [mid for mid, _ in self.index.graph(ents, ck, rings=rings)]
 
         # 4) temporal / recency prior — gated on temporal cues (or explicit
         #    use_recency=True), and down-weighted in fusion either way
         recency_on = _has_temporal_cue(query) if use_recency is None else use_recency
         if recency_on:
-            ranked["recency"] = self.index.recent(min(ck, 15), types=types)
+            ranked["recency"] = self.index.recent(min(ck, 15), types=types, rings=rings)
 
         # over-fetch so post-fusion filtering can still fill k results
         pool = k if include_superseded else max(k * 3, k + 8)
@@ -124,6 +127,8 @@ class Retriever:
             mem = self.store.read_by_id(mid)
             if mem is None:
                 continue
+            if rings is not None and mem.ring not in rings:
+                continue  # index lagging the notes: the canonical ring decides
             if not include_superseded:
                 if mem.duplicate_of:      # merged into a survivor by reflect()
                     continue

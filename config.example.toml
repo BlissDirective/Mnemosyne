@@ -43,8 +43,9 @@ decay_min_age_days = 30    # decay-eligible only if neither updated nor recalled
 # tier: 0 untrusted · 1 standard · 2 senior · 3 owner. Unlisted writers are
 # treated as tier 0. Local stdio/CLI use runs as MNEMOSYNE_WRITER (default owner).
 owner        = { tier = 3 }
-# claude-code  = { tier = 2 }
-# grok-sales-1 = { tier = 1 }
+# claude-code  = { tier = 2, teams = ["ops"] }
+# grok-sales-1 = { tier = 1, teams = ["sales"] }   # may write team:sales directly;
+#                                                  # canon writes are quarantined
 
 [http]
 # `mnemosyne-server --http` serves MCP (streamable HTTP) at http://host:port/mcp;

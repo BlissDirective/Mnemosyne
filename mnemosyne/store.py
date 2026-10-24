@@ -2,7 +2,14 @@
 
 This is the source of truth. The index (index.py) is derived from it and can be
 rebuilt at any time. Filenames are `<id>__<slug>.md` so a human browsing the
-folder (or Obsidian) sees meaningful names.
+folder (or Obsidian) sees meaningful names, and each memory lives in its ring's
+directory (notes/canon/, notes/proposed/, notes/team/<name>/,
+notes/private/<writer>/) so the topology is visible with `ls`. Files from
+before rings (directly under notes/) are still read, and move into their ring's
+directory the next time they are written.
+
+Directories whose name starts with `_` (e.g. notes/canon/_writers/) hold
+owner-readable side records, not memories, and are skipped.
 """
 
 from __future__ import annotations
@@ -11,8 +18,9 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Dict, Iterator, Optional
 
+from . import rings
 from .schema import Memory, slugify, utcnow_iso, content_hash
 
 
@@ -22,28 +30,44 @@ class MarkdownStore:
         self.archive_dir = Path(archive_dir)
         self.notes_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self._paths: Dict[str, Path] = {}   # id -> file; verified on every use
 
     # ---- filenames -------------------------------------------------------
     def _path_for(self, mem: Memory) -> Path:
-        return self.notes_dir / f"{mem.id}__{slugify(mem.text)}.md"
+        return (self.notes_dir / str(rings.ring_dir(mem.ring))
+                / f"{mem.id}__{slugify(mem.text)}.md")
+
+    def _note_files(self, pattern: str = "*.md") -> Iterator[Path]:
+        for p in self.notes_dir.rglob(pattern):
+            rel = p.relative_to(self.notes_dir).parts
+            if any(part.startswith(("_", ".")) for part in rel):
+                continue
+            yield p
 
     def path_by_id(self, mem_id: str) -> Optional[Path]:
-        matches = list(self.notes_dir.glob(f"{mem_id}__*.md"))
+        cached = self._paths.get(mem_id)
+        if cached is not None and cached.exists():
+            return cached
+        matches = sorted(self._note_files(f"{mem_id}__*.md"))
         if not matches:
-            # fall back to any file whose frontmatter id matches
-            for p in self.notes_dir.glob("*.md"):
-                if p.stem.startswith(mem_id):
-                    return p
-        return matches[0] if matches else None
+            matches = [p for p in self._note_files() if p.stem.startswith(mem_id)]
+        if matches:
+            self._paths[mem_id] = matches[0]
+            return matches[0]
+        self._paths.pop(mem_id, None)
+        return None
 
     # ---- CRUD ------------------------------------------------------------
     def write(self, mem: Memory) -> Path:
-        """Create or overwrite the memory's file (renaming if the slug changed)."""
+        """Create or overwrite the memory's file (renaming if the slug changed,
+        moving directories if the ring changed)."""
         existing = self.path_by_id(mem.id)
         target = self._path_for(mem)
+        target.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(target, mem.to_markdown())
         if existing and existing != target:
             existing.unlink(missing_ok=True)
+        self._paths[mem.id] = target
         return target
 
     def read(self, path: Path) -> Memory:
@@ -55,21 +79,24 @@ class MarkdownStore:
 
     def delete(self, mem_id: str) -> bool:
         p = self.path_by_id(mem_id)
+        self._paths.pop(mem_id, None)
         if p and p.exists():
             p.unlink()
             return True
         return False
 
     def iter_memories(self) -> Iterator[Memory]:
-        for p in sorted(self.notes_dir.glob("*.md")):
+        for p in sorted(self._note_files()):
             try:
-                yield self.read(p)
+                mem = self.read(p)
             except Exception:
                 # a malformed file should never break the whole store
                 continue
+            self._paths[mem.id] = p
+            yield mem
 
     def count(self) -> int:
-        return sum(1 for _ in self.notes_dir.glob("*.md"))
+        return sum(1 for _ in self._note_files())
 
     # ---- verbatim archive ------------------------------------------------
     def archive_raw(self, text: str, label: str = "session") -> Path:

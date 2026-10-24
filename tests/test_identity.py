@@ -19,7 +19,7 @@ from mnemosyne.journal import replay_states
 from mnemosyne.schema import Memory
 
 ROSTER = {"owner": WriterSpec(3), "claude-code": WriterSpec(2),
-          "grok-sales-1": WriterSpec(1)}
+          "grok-sales-1": WriterSpec(1, teams=["sales"])}
 TOKENS = {"owner": "tok-owner-123", "claude-code": "tok-cc-456",
           "grok-sales-1": "tok-grok-789"}
 
@@ -53,7 +53,8 @@ def disk_state(eng: MemoryEngine):
 def test_every_memory_carries_a_writer(tmp_path):
     eng = make_engine(tmp_path)
     a = eng.remember("Owner fact.")
-    b = eng.remember("Sales lead: Initech wants a demo.", writer="grok-sales-1")
+    b = eng.remember("Sales lead: Initech wants a demo.", writer="grok-sales-1",
+                     ring="team:sales")
     assert a.writer == "owner" and b.writer == "grok-sales-1"
     # canonical frontmatter carries it, and it round-trips
     assert "writer: grok-sales-1" in eng.store.path_by_id(b.id).read_text()
@@ -76,7 +77,8 @@ def test_writer_is_part_of_meta_hash():
 def test_writer_shows_in_recall_and_prime(tmp_path):
     from mnemosyne.server import _format_hits
     eng = make_engine(tmp_path)
-    eng.remember("The user prefers Python.", type="preference", writer="claude-code")
+    eng.remember("The user prefers Python.", type="preference", writer="claude-code",
+                 ring="canon")
     hits = eng.recall("python preference")
     assert "writer=claude-code" in _format_hits(hits)
     assert "writer=claude-code" in eng.prime()
@@ -229,12 +231,18 @@ def test_gateway_auth_and_routes(gateway):
 
     status, body = _post(base + "/remember",
                          {"text": "Globex renewal is due in March.", "type": "world_fact",
-                          "entities": ["Globex"]}, TOKENS["grok-sales-1"])
+                          "entities": ["Globex"], "ring": "team:sales"},
+                         TOKENS["grok-sales-1"])
     assert status == 200, body
     mem_id = json.loads(body)["id"]
     assert eng.get(mem_id).writer == "grok-sales-1"
 
+    # claude-code is not on the sales team: tier 2 may read it, but only on request
     status, body = _post(base + "/recall", {"query": "Globex renewal"},
+                         TOKENS["claude-code"])
+    assert status == 200 and json.loads(body)["hits"] == []
+    status, body = _post(base + "/recall", {"query": "Globex renewal",
+                                            "scope": ["team:sales"]},
                          TOKENS["claude-code"])
     out = json.loads(body)
     assert status == 200 and out["hits"][0]["writer"] == "grok-sales-1"
@@ -256,8 +264,10 @@ def test_gateway_auth_and_routes(gateway):
 # --------------------------------------------------------------------------- #
 def test_every_mutation_is_journaled_and_replays(tmp_path):
     eng = make_engine(tmp_path, counter_flush_every=1)
-    a = eng.remember("The user lives in Berlin.", type="world_fact", writer="claude-code")
-    b = eng.remember("The user lives in Berlin.", type="world_fact", writer="grok-sales-1")
+    a = eng.remember("The user lives in Berlin.", type="world_fact", writer="claude-code",
+                     ring="canon")
+    b = eng.remember("The user lives in Berlin.", type="world_fact", writer="owner",
+                     ring="canon")
     c = eng.remember("Temporary note.", type="episodic")
     eng.update(a.id, tags=["home"], writer="owner")
     eng.recall("where does the user live?")          # counter flush -> 'access'

@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS memories (
     duplicate_of  TEXT,          -- id of the surviving memory, if superseded
     recall_count  INTEGER DEFAULT 0,
     last_recalled TEXT,
+    writer        TEXT,
+    ring          TEXT,
     content_hash  TEXT,
     meta_hash     TEXT,
     embed_model   TEXT,
@@ -79,6 +81,8 @@ _MIGRATIONS = {
     "duplicate_of": "ALTER TABLE memories ADD COLUMN duplicate_of TEXT",
     "recall_count": "ALTER TABLE memories ADD COLUMN recall_count INTEGER DEFAULT 0",
     "last_recalled": "ALTER TABLE memories ADD COLUMN last_recalled TEXT",
+    "writer": "ALTER TABLE memories ADD COLUMN writer TEXT",
+    "ring": "ALTER TABLE memories ADD COLUMN ring TEXT",
 }
 
 
@@ -105,6 +109,7 @@ class MemoryIndex:
             for col, ddl in _MIGRATIONS.items():
                 if col not in cols:
                     self.db.execute(ddl)
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_mem_ring ON memories(ring)")
             self.db.commit()
         self._matrix: Optional[np.ndarray] = None   # cached (n, dim) vectors
         self._ids: List[str] = []                    # row order for the matrix
@@ -124,9 +129,9 @@ class MemoryIndex:
         self.db.execute(
             """INSERT INTO memories
                (id,type,text,created,updated,source,confidence,valid_from,valid_to,
-                tags,entities,duplicate_of,recall_count,last_recalled,
+                tags,entities,duplicate_of,recall_count,last_recalled,writer,ring,
                 content_hash,meta_hash,embed_model,dim,vector)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  type=excluded.type, text=excluded.text, updated=excluded.updated,
                  source=excluded.source, confidence=excluded.confidence,
@@ -134,13 +139,14 @@ class MemoryIndex:
                  tags=excluded.tags, entities=excluded.entities,
                  duplicate_of=excluded.duplicate_of,
                  recall_count=excluded.recall_count, last_recalled=excluded.last_recalled,
+                 writer=excluded.writer, ring=excluded.ring,
                  content_hash=excluded.content_hash, meta_hash=excluded.meta_hash,
                  embed_model=excluded.embed_model,
                  dim=excluded.dim, vector=excluded.vector""",
             (mem.id, mem.type.value, mem.text, mem.created, mem.updated, mem.source,
              mem.confidence, mem.valid_from, mem.valid_to,
              json.dumps(mem.tags), json.dumps(mem.entities), mem.duplicate_of,
-             mem.recall_count, mem.last_recalled,
+             mem.recall_count, mem.last_recalled, mem.writer, mem.ring,
              mem.hash, mem.meta_hash, embed_model, dim, _vec_to_blob(vector)),
         )
         self._refresh_fts_and_entities(mem)
@@ -158,12 +164,13 @@ class MemoryIndex:
                 """UPDATE memories SET
                      type=?, updated=?, source=?, confidence=?, valid_from=?,
                      valid_to=?, tags=?, entities=?, duplicate_of=?,
-                     recall_count=?, last_recalled=?, meta_hash=?
+                     recall_count=?, last_recalled=?, writer=?, ring=?, meta_hash=?
                    WHERE id=?""",
                 (mem.type.value, mem.updated, mem.source, mem.confidence,
                  mem.valid_from, mem.valid_to, json.dumps(mem.tags),
                  json.dumps(mem.entities), mem.duplicate_of,
-                 mem.recall_count, mem.last_recalled, mem.meta_hash, mem.id),
+                 mem.recall_count, mem.last_recalled, mem.writer, mem.ring,
+                 mem.meta_hash, mem.id),
             )
             self._refresh_fts_and_entities(mem)
             self.db.commit()
@@ -229,7 +236,8 @@ class MemoryIndex:
 
     # ---- read path: strategies ------------------------------------------
     def semantic(self, query_vec: np.ndarray, k: int,
-                 types: Optional[Sequence[str]] = None) -> List[Tuple[str, float]]:
+                 types: Optional[Sequence[str]] = None,
+                 rings: Optional[Sequence[str]] = None) -> List[Tuple[str, float]]:
         self._ensure_matrix()
         if self._matrix is None or self._matrix.shape[0] == 0:
             return []
@@ -239,78 +247,104 @@ class MemoryIndex:
         sims = self._matrix @ query_vec.astype(np.float32)   # cosine (all normalized)
         order = np.argsort(-sims)
         allow = set(types) if types else None
-        type_of: Dict[str, str] = {}
-        if allow is not None:
+        allow_rings = set(rings) if rings is not None else None
+        row_of: Dict[str, Tuple[str, str]] = {}
+        if allow is not None or allow_rings is not None:
             with self._lock:
-                rows = self.db.execute("SELECT id, type FROM memories").fetchall()
-            type_of = {r["id"]: r["type"] for r in rows}
+                rows = self.db.execute("SELECT id, type, ring FROM memories").fetchall()
+            row_of = {r["id"]: (r["type"], _ring(r["ring"])) for r in rows}
         results: List[Tuple[str, float]] = []
         for idx in order:
             mid = self._ids[idx]
-            if allow is not None and type_of.get(mid) not in allow:
+            if allow is not None and row_of.get(mid, ("", ""))[0] not in allow:
+                continue
+            if allow_rings is not None and row_of.get(mid, ("", ""))[1] not in allow_rings:
                 continue
             results.append((mid, float(sims[idx])))
             if len(results) >= k:
                 break
         return results
 
-    def keyword(self, query: str, k: int) -> List[Tuple[str, float]]:
+    def keyword(self, query: str, k: int,
+                rings: Optional[Sequence[str]] = None) -> List[Tuple[str, float]]:
         match = _fts_query(query)
         if not match:
             return []
+        ring_sql, ring_args = _ring_filter("m", rings)
         try:
             with self._lock:
                 rows = self.db.execute(
-                    "SELECT id, bm25(memories_fts) AS score FROM memories_fts "
-                    "WHERE memories_fts MATCH ? ORDER BY score LIMIT ?",
-                    (match, k),
+                    "SELECT f.id AS id, bm25(memories_fts) AS score FROM memories_fts f "
+                    "JOIN memories m ON m.id = f.id "
+                    f"WHERE memories_fts MATCH ? {ring_sql} ORDER BY score LIMIT ?",
+                    (match, *ring_args, k),
                 ).fetchall()
         except sqlite3.OperationalError:
             return []
         # bm25 returns lower=better; convert to positive relevance
         return [(r["id"], -float(r["score"])) for r in rows]
 
-    def graph(self, entities: Sequence[str], k: int) -> List[Tuple[str, float]]:
+    def graph(self, entities: Sequence[str], k: int,
+              rings: Optional[Sequence[str]] = None) -> List[Tuple[str, float]]:
         ents = [e.strip().lower() for e in entities if e.strip()]
         if not ents:
             return []
         placeholders = ",".join("?" * len(ents))
+        ring_sql, ring_args = _ring_filter("m", rings)
         with self._lock:
             rows = self.db.execute(
-                f"""SELECT memory_id, COUNT(*) AS hits FROM mem_entities
-                    WHERE entity IN ({placeholders})
-                    GROUP BY memory_id ORDER BY hits DESC LIMIT ?""",
-                (*ents, k),
+                f"""SELECT e.memory_id AS memory_id, COUNT(*) AS hits FROM mem_entities e
+                    JOIN memories m ON m.id = e.memory_id
+                    WHERE e.entity IN ({placeholders}) {ring_sql}
+                    GROUP BY e.memory_id ORDER BY hits DESC LIMIT ?""",
+                (*ents, *ring_args, k),
             ).fetchall()
         return [(r["memory_id"], float(r["hits"])) for r in rows]
 
-    def recent(self, k: int, types: Optional[Sequence[str]] = None) -> List[str]:
+    def recent(self, k: int, types: Optional[Sequence[str]] = None,
+               rings: Optional[Sequence[str]] = None) -> List[str]:
+        ring_sql, ring_args = _ring_filter("m", rings)
+        type_sql, type_args = "", ()
+        if types:
+            type_sql = f"AND m.type IN ({','.join('?' * len(types))})"
+            type_args = tuple(types)
         with self._lock:
-            if types:
-                placeholders = ",".join("?" * len(types))
-                rows = self.db.execute(
-                    f"SELECT id FROM memories WHERE type IN ({placeholders}) "
-                    f"ORDER BY created DESC LIMIT ?", (*types, k)).fetchall()
-            else:
-                rows = self.db.execute(
-                    "SELECT id FROM memories ORDER BY created DESC LIMIT ?", (k,)).fetchall()
+            rows = self.db.execute(
+                f"SELECT m.id AS id FROM memories m WHERE 1=1 {type_sql} {ring_sql} "
+                "ORDER BY m.created DESC LIMIT ?", (*type_args, *ring_args, k)).fetchall()
         return [r["id"] for r in rows]
 
-    def top_for_priming(self, k: int) -> List[str]:
+    def top_for_priming(self, k: int,
+                        rings: Optional[Sequence[str]] = None) -> List[str]:
         """Best memories to inject at session start: not superseded, ranked by a
         blend of confidence, how often they're actually recalled, and recency.
         (Expired world_facts are filtered by the caller, which has the Memory.)"""
+        ring_sql, ring_args = _ring_filter("m", rings)
         with self._lock:
             rows = self.db.execute(
-                """SELECT id FROM memories
-                   WHERE duplicate_of IS NULL
-                   ORDER BY (COALESCE(confidence, 0.7)
-                             + 0.03 * MIN(COALESCE(recall_count, 0), 10)) DESC,
-                            updated DESC
+                f"""SELECT m.id AS id FROM memories m
+                   WHERE m.duplicate_of IS NULL {ring_sql}
+                   ORDER BY (COALESCE(m.confidence, 0.7)
+                             + 0.03 * MIN(COALESCE(m.recall_count, 0), 10)) DESC,
+                            m.updated DESC
                    LIMIT ?""",
-                (k,),
+                (*ring_args, k),
             ).fetchall()
         return [r["id"] for r in rows]
+
+    def ids_in_ring(self, ring: str) -> List[Tuple[str, str]]:
+        """(id, created) for every memory in a ring, oldest first."""
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT id, created FROM memories WHERE COALESCE(ring, 'canon') = ? "
+                "ORDER BY created, id", (ring,)).fetchall()
+        return [(r["id"], r["created"]) for r in rows]
+
+    def known_rings(self) -> List[str]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT COALESCE(ring, 'canon') AS ring FROM memories").fetchall()
+        return [r["ring"] for r in rows]
 
     # ---- helpers ---------------------------------------------------------
     def get_meta(self, mem_id: str) -> Optional[sqlite3.Row]:
@@ -318,7 +352,7 @@ class MemoryIndex:
             return self.db.execute(
                 "SELECT id,type,text,created,updated,source,confidence,valid_from,"
                 "valid_to,tags,entities,duplicate_of,recall_count,last_recalled,"
-                "embed_model FROM memories WHERE id=?",
+                "writer,ring,embed_model FROM memories WHERE id=?",
                 (mem_id,)).fetchone()
 
     def all_vectors(self) -> Tuple[List[str], np.ndarray]:
@@ -338,8 +372,28 @@ class MemoryIndex:
             never_recalled = self.db.execute(
                 "SELECT COUNT(*) c FROM memories "
                 "WHERE COALESCE(recall_count, 0) = 0").fetchone()["c"]
-        return {"total": total, "by_type": by_type, "by_embed_model": models,
+            by_ring = {r["ring"]: r["c"] for r in self.db.execute(
+                "SELECT COALESCE(ring, 'canon') ring, COUNT(*) c FROM memories "
+                "GROUP BY 1").fetchall()}
+        return {"total": total, "by_type": by_type, "by_ring": by_ring,
+                "by_embed_model": models,
                 "superseded": superseded, "never_recalled": never_recalled}
+
+
+def _ring(value: Optional[str]) -> str:
+    return value or "canon"
+
+
+def _ring_filter(alias: str, rings: Optional[Sequence[str]]) -> Tuple[str, tuple]:
+    """SQL fragment restricting `alias` to the given rings (None = no filter).
+    A missing ring column value reads as canon, like a ring-less note."""
+    if rings is None:
+        return "", ()
+    rings = list(rings)
+    if not rings:
+        return "AND 0", ()
+    return (f"AND COALESCE({alias}.ring, 'canon') IN ({','.join('?' * len(rings))})",
+            tuple(rings))
 
 
 def _fts_query(query: str) -> str:
