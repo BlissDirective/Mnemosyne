@@ -17,6 +17,9 @@ Claude Code SessionStart hook).
     python -m mnemosyne.cli curate [--json]           # librarian work list
     python -m mnemosyne.cli replay --out DIR [--as-of 2026-10-01]
     python -m mnemosyne.cli verify-journal             # hash-chain check
+    python -m mnemosyne.cli decide "quote Acme $900" --query "Acme pricing"
+    python -m mnemosyne.cli approve <id> --note "..."  # owner: clear for high stakes
+    python -m mnemosyne.cli metrics [--since 2026-10-01] [--json]
     python -m mnemosyne.cli propose --id <id> | --text "..." [--target canon]
     python -m mnemosyne.cli promote <id> | reject <id> --reason "..."
 
@@ -124,6 +127,19 @@ def main(argv=None) -> int:
 
     sub.add_parser("verify-journal", help="check the journal's hash chain")
 
+    dc = sub.add_parser("decide", help="guardrail check before a high-stakes action")
+    dc.add_argument("action")
+    dc.add_argument("--query", default=None)
+    dc.add_argument("--ids", nargs="*", default=[])
+
+    ap = sub.add_parser("approve", help="owner: clear a memory for high-stakes use")
+    ap.add_argument("id")
+    ap.add_argument("--note", required=True)
+
+    mt = sub.add_parser("metrics", help="pilot metrics from the journal")
+    mt.add_argument("--since", default=None, help="ISO date")
+    mt.add_argument("--json", action="store_true")
+
     cu = sub.add_parser("curate", help="the librarian's work list (tier >= 2)")
     cu.add_argument("--json", action="store_true", help="machine-readable output")
     cu.add_argument("--max-items", type=int, default=20)
@@ -224,6 +240,19 @@ def _dispatch(engine: MemoryEngine, args) -> None:
         print(json.dumps(result, indent=2))
         if not result["ok"]:
             raise ValueError(f"journal verification FAILED: {result['error']}")
+    elif args.cmd == "decide":
+        out = engine.recall_for_decision(args.action, query=args.query, ids=args.ids)
+        print(f"decision: {out['decision'].upper()}  ({out['action']})")
+        for v in out["memories"]:
+            why = f"  <- {'; '.join(v['reasons'])}" if v["reasons"] else ""
+            print(f"- {v['verdict']:<8} {v['id']} {v['text'][:80]}{why}")
+    elif args.cmd == "approve":
+        out = engine.approve(args.id, args.note)
+        print(f"approved {out['id']} until {out['until']}")
+    elif args.cmd == "metrics":
+        from . import metrics
+        m = metrics.compute(engine, since=args.since)
+        print(json.dumps(m, indent=2) if args.json else metrics.render(m))
     elif args.cmd == "curate":
         work = engine.curate(max_items=args.max_items)
         if args.json:

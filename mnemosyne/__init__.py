@@ -1,27 +1,26 @@
-"""Mnemosyne — a local-first, portable memory engine for AI agents.
+"""Mnemosyne — shared, governed memory for teams of AI agents, from any vendor.
 
-Design in one sentence: the *source of truth* is plain Markdown you own; the
-searchable index (vectors + keyword + graph) is a rebuildable cache derived
-from it. Swap embedding models freely and re-index from the preserved text —
-that is the "evolutionary" property.
+Design in one sentence: the *source of truth* is plain Markdown you own (plus
+a hash-chained journal of every change); the searchable index (vectors +
+keyword + graph) is a rebuildable cache derived from it.
 
 Layers:
-  store        canonical Markdown + YAML frontmatter (+ verbatim archive)
-  embeddings   pluggable providers (dev / OpenAI / Voyage / local),
-               batched + retried, with asymmetric query embeddings
-  index        SQLite (WAL, metadata + FTS5 keyword) + numpy vectors
-  retrieval    multi-strategy recall fused with weighted Reciprocal Rank
-               Fusion; filters superseded duplicates and expired facts
-  consolidate  reflect(): dedup, reinforce, decay — memory that refines itself
-               (decay is gated on real access: recently recalled memories
-               never decay)
-  engine       update-in-place, access counters with batched write-back,
-               and `prime` context for session-start hooks
-  server       FastMCP server exposing remember / recall / update / reflect /
-               forget / stats / reindex
+  store        canonical Markdown + YAML frontmatter, one directory per ring
+  journal      hash-chained event log: replay, as-of snapshots, verification
+  embeddings   pluggable providers (dev / OpenAI / Voyage / local)
+  index        SQLite (WAL, metadata + FTS5 + relations) + numpy vectors
+  retrieval    multi-strategy recall fused with weighted RRF
+  consolidate  reflect(): dedup, reinforce, decay, contradiction candidates
+  auth, rings  writer identity, trust tiers, ring access policy, quarantine
+  reputation   outcome-calibrated writer reputation
+  librarian    the curation cycle and weekly digests
+  guardrails   secrets screen and the high-stakes decision gate
+  metrics      pilot metrics from the journal
+  engine       the single entry point; server (MCP stdio/HTTP), gateway
+               (JSON/HTTP) and cli are thin surfaces over it
 """
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
 from .schema import Memory, MemoryType  # noqa: E402,F401
 

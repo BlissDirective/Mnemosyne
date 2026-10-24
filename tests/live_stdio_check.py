@@ -31,7 +31,7 @@ async def main() -> int:
                 "memory_reflect", "memory_forget", "memory_stats",
                 "memory_reindex", "memory_propose", "memory_promote",
                 "memory_reject", "memory_relate", "memory_resolve",
-                "memory_curate",
+                "memory_curate", "memory_recall_for_decision", "memory_approve",
             ]), names
 
             upd = next(t for t in tools.tools if t.name == "memory_update")

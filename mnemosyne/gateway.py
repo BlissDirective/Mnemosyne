@@ -6,6 +6,8 @@ logic lives here.
     POST /remember   {"text": ..., "type": ..., "entities": [...], "ring": ..., ...}
     POST /recall     {"query": ..., "k": 8, "types": [...], "entities": [...], "scope": [...]}
     POST /update     {"id": ..., "text": ..., "confidence": ..., ...}
+    POST /propose    {"id": ... | "text": ..., "target": "canon", ...}
+    POST /recall_for_decision   {"action": ..., "query": ..., "ids": [...]}
     GET  /health     (no auth; returns {"status": "ok"})
 
 Run:  mnemosyne-gateway [--host 127.0.0.1] [--port 8788]
@@ -32,6 +34,8 @@ _REMEMBER_KEYS = {"text", "type", "entities", "tags", "source", "confidence",
                   "valid_from", "valid_to", "archive_text", "ring",
                   "due", "owner_agent", "review_by", "relations"}
 _RECALL_KEYS = {"query", "k", "types", "entities", "include_superseded", "scope"}
+_PROPOSE_KEYS = {"id", "text", "type", "entities", "tags", "target", "relations"}
+_DECISION_KEYS = {"action", "query", "ids", "entities", "k"}
 _UPDATE_KEYS = {"id", "text", "type", "entities", "tags", "confidence",
                 "valid_from", "valid_to", "source", "due", "owner_agent", "review_by"}
 
@@ -82,7 +86,20 @@ def make_routes(eng: MemoryEngine) -> Dict[str, Callable[[Identity, Dict[str, An
             raise GatewayError(404, "memory not found; get a valid id from /recall")
         return {"status": "ok", "id": mem.id, "updated": mem.updated, "text": mem.text}
 
-    return {"/remember": remember, "/recall": recall, "/update": update}
+    def propose(ident: Identity, body: Dict[str, Any]) -> Dict:
+        args = _pick(body, _PROPOSE_KEYS, ())
+        mem = eng.propose(args.pop("id", None), text=args.pop("text", None),
+                          target=args.pop("target", "canon"), writer=ident.writer, **args)
+        return {"status": "ok", "id": mem.id, "ring": mem.ring,
+                "target": mem.proposed_target}
+
+    def recall_for_decision(ident: Identity, body: Dict[str, Any]) -> Dict:
+        args = _pick(body, _DECISION_KEYS, ("action",))
+        return {"status": "ok",
+                **eng.recall_for_decision(args.pop("action"), writer=ident.writer, **args)}
+
+    return {"/remember": remember, "/recall": recall, "/update": update,
+            "/propose": propose, "/recall_for_decision": recall_for_decision}
 
 
 def make_handler(eng: MemoryEngine):
@@ -130,6 +147,8 @@ def make_handler(eng: MemoryEngine):
                 self._send(200, route(ident, body))
             except GatewayError as e:
                 self._send(e.status, {"error": str(e)})
+            except LookupError as e:
+                self._send(404, {"error": str(e)})
             except (ValueError, TypeError) as e:
                 self._send(400, {"error": f"{type(e).__name__}: {e}"})
             except PermissionError as e:

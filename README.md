@@ -1,12 +1,29 @@
 # Mnemosyne
 
-A **local-first, portable, evolutionary** memory engine for AI agents, exposed
-over MCP so Claude Desktop and Claude Code can remember across sessions.
+**Shared, governed memory for teams of AI agents, from any vendor.** Claude,
+Grok, GPT, and open-weight agents read and write one memory over MCP or plain
+HTTP. Every write has an author, low-trust agents can't poison shared truth,
+and the whole memory is plain Markdown you own.
 
-The whole design in one line: **the source of truth is plain Markdown you own;
-the searchable index is a rebuildable cache derived from it.** That single choice
-is what makes "seamless local + remote" tractable and what lets you upgrade
-embedding models without ever losing data.
+The core design is one sentence: **the source of truth is plain Markdown you
+own, and the searchable index is a rebuildable cache derived from it.** That
+choice makes "seamless local + remote" tractable and lets you upgrade
+embedding models without ever losing data. On top of it, v1.0 adds what an
+organization needs to run on shared memory:
+
+| | |
+|---|---|
+| **Identity** | every memory records its writer; HTTP and MCP calls are authenticated per agent ([↓](#many-writers-identity-http-transport-audit-journal)) |
+| **Rings and review** | private notebooks, team memory, a reviewed canon. Low-trust writes are quarantined until a senior promotes them ([↓](#rings-private-notebooks-team-memory-a-reviewed-canon)) |
+| **Business types** | decisions, commitments, owner-only policies, hypotheses, typed relations, contradiction surfacing ([↓](#business-memory-decisions-commitments-policies-hypotheses)) |
+| **Calibration** | outcomes resolve hypotheses, and writer reputation tracks who turns out to be right ([↓](#calibration-confidence-that-tracks-the-truth)) |
+| **The librarian** | a scheduled curation cycle with weekly digests ([↓](#the-librarian-curation-as-a-job)) |
+| **The journal** | hash-chained event log, byte-exact replay, and "what did we believe then?" queries ([↓](#the-journal-a-tamper-evident-system-of-record)) |
+| **Guardrails** | no unreviewed memory justifies a high-stakes action, and secrets never enter memory ([↓](#guardrails-and-the-pilot)) |
+
+Running it as a team: [`AGENTS.md`](AGENTS.md) (roster and agent protocol),
+[`LIBRARIAN.md`](LIBRARIAN.md) (curation runbook), [`docs/PILOT.md`](docs/PILOT.md)
+(operating the pilot), [`ROADMAP.md`](ROADMAP.md) (how it was built).
 
 ---
 
@@ -60,31 +77,26 @@ keeps using never fades, however old it is.
 mnemosyne/
 ├── mnemosyne/
 │   ├── schema.py       Memory + MemoryType, Markdown (de)serialization
-│   ├── store.py        canonical Markdown store + verbatim archive
+│   ├── store.py        canonical Markdown store (one directory per ring) + archive
 │   ├── embeddings.py   pluggable providers: dev / openai / voyage (+ your own)
-│   ├── index.py        SQLite + FTS5 + numpy vectors + entity graph; reindex()
+│   ├── index.py        SQLite + FTS5 + numpy vectors + entity graph + relations
 │   ├── retrieval.py    semantic + keyword + graph (+ gated recency), weighted RRF
-│   ├── consolidate.py  reflect(): dedup, reinforce, access-gated decay
-│   ├── engine.py       update-in-place, access counters, prime(); wires it all
-│   ├── server.py       FastMCP/MCPServer: the memory_* tools (mcp 1.x & 2.x), stdio + HTTP
+│   ├── consolidate.py  reflect(): dedup, reinforce, decay, contradiction candidates
+│   ├── engine.py       the single entry point: every operation, permission, journal write
 │   ├── auth.py         writer identity, bearer-token resolution
-│   ├── rings.py        ring access policy (private / team / proposed / canon)
+│   ├── rings.py        the access policy (private / team / proposed / canon, policies)
+│   ├── journal.py      hash-chained event journal: replay, verify
 │   ├── reputation.py   Brier-calibrated writer reputation
 │   ├── librarian.py    the curation cycle (judge-driven; see LIBRARIAN.md)
-│   ├── journal.py      hash-chained event journal: replay, verify
-│   ├── gateway.py      JSON/HTTP adapter for non-MCP agents
-│   └── cli.py          same operations for humans, sync hooks, and session hooks
-├── tests/test_pipeline.py      offline suite: core engine
-├── tests/test_identity.py      identity, HTTP auth, journal, hammer tests
-├── tests/test_rings.py         rings, quarantine, promotion workflow
-├── tests/test_business_types.py  decisions/commitments/policies, relations, contradictions
-├── tests/test_calibration.py   outcome resolution, reputation, bounded ranking prior
-├── tests/test_librarian.py     work list, full curation cycle, digests
-├── tests/test_event_sourcing.py  hash chain, replay round trip, as-of recall
-├── tests/live_stdio_check.py   real MCP client <-> server round trip
+│   ├── guardrails.py   secrets screen, suspicion, high-stakes decision gate
+│   ├── metrics.py      pilot metrics from the journal
+│   ├── server.py       MCP server (stdio + authenticated HTTP), mcp 1.x & 2.x
+│   ├── gateway.py      JSON/HTTP adapter for agents that can't speak MCP
+│   └── cli.py          the same operations for humans, hooks, and cron
+├── tests/                      offline suite + live MCP stdio check
+├── AGENTS.md  LIBRARIAN.md  ROADMAP.md  docs/PILOT.md
 ├── config.example.toml
-├── pyproject.toml
-└── requirements.txt
+└── pyproject.toml
 ```
 
 ---
@@ -189,9 +201,8 @@ Qwen3-Embedding.
 }
 ```
 
-3. Restart Claude Desktop. You should now have `memory_remember`,
-   `memory_recall`, `memory_update`, `memory_reflect`, `memory_forget`,
-   `memory_stats`, and `memory_reindex` available.
+3. Restart Claude Desktop. The `memory_*` tools should now be available
+   (see [The tools](#the-tools)).
 
 > The server runs on both generations of the MCP Python SDK: it imports
 > `MCPServer` on mcp 2.x and falls back to `FastMCP` on mcp 1.x.
@@ -265,99 +276,51 @@ Notes that matter:
 
 ---
 
-## The librarian: curation as a job
+## Many writers: identity, HTTP transport, audit journal
 
-A scheduled Claude Code session connects as writer `librarian` (tier 2) and
-runs the cycle in [`LIBRARIAN.md`](LIBRARIAN.md) every week:
+With more than one agent writing, *who wrote this* matters more than anything
+else in a memory. Every memory records its `writer` (a stable id such as
+`owner`, `claude-code`, or `grok-sales-1`), and every mutation is appended to
+`journal/events.jsonl`.
 
-1. **Merge** duplicate clusters (update the survivor, forget the rest).
-2. **Adjudicate** contested pairs. When one side is clearly right, the
-   librarian *proposes* a resolution (a `decision` with a `supersedes` edge)
-   for the owner to sign off. When it can't tell, it records a `contradicts`
-   edge so recall flags both. It never decides on its own.
-3. **Work the review queue**: promote clean facts, reject noise with a
-   reason. It leaves policies, its own proposals, and money matters to the
-   owner.
-4. **Write the weekly digest**: a canon memory tagged `digest:<ISO-week>`.
+**Declare your writers** in `config.toml` (tiers: 0 untrusted, 1 standard,
+2 senior, 3 owner; anyone not listed is tier 0):
 
-Discovery is deterministic and free. `mnemosyne curate` (or the
-`memory_curate` tool) prints the whole work list, so the session spends its
-tokens on judgment. The same loop is available in code as
-`mnemosyne.librarian.run_cycle(engine, judge)` for any LLM harness.
-
-**Tiered recall.** Broad queries (no entities, `k ≥ 10`) return the digests
-first, then raw memories. Pass `digests=false` to skip them or `digests=true`
-to force them.
-
-```bash
-MNEMOSYNE_WRITER=librarian mnemosyne curate          # human-readable work list
-MNEMOSYNE_WRITER=librarian mnemosyne curate --json   # for the session
+```toml
+[writers]
+owner        = { tier = 3 }
+claude-code  = { tier = 2 }
+grok-sales-1 = { tier = 1 }
 ```
 
----
+**Local use (stdio / CLI)** runs as `MNEMOSYNE_WRITER` (default `owner`).
 
-## Calibration: confidence that tracks the truth
-
-Corroboration and usage raise confidence, but a business needs confidence that
-tracks *what turned out to be true*. Resolve a `hypothesis` (or `decision`)
-when the outcome is known:
+**Several agents at once: MCP over HTTP.** Give each writer a token in the
+environment (never in a file) and start the server:
 
 ```bash
-mnemosyne resolve <id> confirmed --note "Q3 retention +8pts"   # or refuted / mixed
-mnemosyne reputation
+export MNEMOSYNE_TOKEN_CLAUDE_CODE="$(openssl rand -hex 32)"
+export MNEMOSYNE_TOKEN_GROK_SALES_1="$(openssl rand -hex 32)"
+mnemosyne-server --http --host 127.0.0.1 --port 8787     # MCP at /mcp
 ```
 
-- **confirmed**: confidence rises to at least 0.90. Reflect's corroboration is
-  capped at 0.85, so repeated assertion can never outrank a verified outcome.
-- **refuted**: the memory is retired (`valid_to` = today, tag `refuted`) and
-  drops out of default recall, but it is never deleted. The history is the lesson.
-- **mixed**: confidence moves halfway toward 0.5.
+Each request must send `Authorization: Bearer <token>`; the token decides the
+writer, and an unknown or missing token gets `401` before anything touches the
+store. Keep it on localhost or behind a TLS proxy.
 
-The author's confidence at resolution time is scored as a forecast (Brier).
-Each writer's **reputation** is 1 minus their smoothed mean Brier score (0.75
-means no track record). It is derived from the resolved memories themselves,
-written to `notes/canon/_writers/<writer>.md` for the owner to read, and
-mirrored in the index. In ranking it scales a memory's confidence by
-×0.8–1.2, and that calibrated confidence acts as a **tie-breaker**. Equally
-relevant memories (which fuse to exactly equal scores) are ordered by track
-record, but a strictly more relevant memory is never outranked on reputation
-alone. Resolvers need tier ≥ 2 and can't grade their own memories. `prime`
-lists hypotheses past `review_by` under **[awaiting resolution]**, and the
-reputation numbers tell you when a tier-1 agent has earned tier 2.
+**Agents that can't speak MCP** use the JSON gateway (same tokens, no logic of
+its own):
 
----
+```bash
+mnemosyne-gateway --port 8788
+curl -s localhost:8788/remember -H "Authorization: Bearer $MNEMOSYNE_TOKEN_GROK_SALES_1" \
+     -d '{"text": "Initech asked for a demo next week.", "type": "episodic"}'
+```
 
-## Business memory: decisions, commitments, policies, hypotheses
+Routes: `POST /remember`, `POST /recall`, `POST /update`, `GET /health`.
 
-Four types (v0.6) for what an organization actually runs on:
-
-| Type | Use it for | Extra fields |
-|---|---|---|
-| `decision` | statement, rationale, alternatives rejected, revisit-when | — must be in canon before anyone acts on it (recall flags unratified ones) |
-| `commitment` | a promise someone must keep | `due`, `owner_agent`. `prime` lists those due within 7 days or overdue at the top. Close one with `tags: [done]` or `valid_to`. |
-| `policy` | a standing constraint ("never discount below 20%") | **tier 3 writes only.** Recall and `prime` show policies in their own labeled section. |
-| `hypothesis` | a falsifiable belief | `review_by` |
-
-Policies are the one deliberate exception to "memories are data, not
-instructions", and the strict write rule is what makes that exception safe.
-Only a policy that sits in canon and was written or adopted by the owner is
-shown as a policy. A policy-typed file from anywhere else (a tampered sync, a
-hand edit) is shown as `⚠ unverified policy` data. Agents may *propose* a
-policy, but only the owner can promote it.
-
-**Typed relations.** `memory_relate src <rel> dst` with `supports`,
-`contradicts`, `supersedes`, or `evidence_for`. Relations live in the
-source memory's frontmatter (`relations:`), so they sync and survive
-rebuilds, and they take effect only once that memory is out of the review
-queue.
-
-**Contradictions are surfaced, never auto-resolved.** `reflect` reports
-candidates in `contested`: same type, a shared entity, and similar enough to be
-about the same thing but not duplicates (cosine 0.70–0.94, configurable with
-`[consolidation] contradiction_band`). The librarian or owner resolves each
-one: `supersedes` retires the loser from default recall, while `contradicts`
-records the disagreement. Recall marks every memory with a live `contradicts`
-edge as **⚠ contested**, so no agent acts on a disputed belief unknowingly.
+**The journal** is the system of record (next section). `mnemosyne journal -n 20`
+shows the latest events.
 
 ---
 
@@ -404,6 +367,102 @@ private ring, and your teams by default. Pass `scope` (`["team:ops"]`,
 `["proposed"]`, `["all"]`) to search further, within what your tier may read.
 `reflect` never merges or corroborates across rings, so an agent repeating
 itself in its private ring cannot move canon.
+
+---
+
+## Business memory: decisions, commitments, policies, hypotheses
+
+Four types (v0.6) for what an organization actually runs on:
+
+| Type | Use it for | Extra fields |
+|---|---|---|
+| `decision` | statement, rationale, alternatives rejected, revisit-when | — must be in canon before anyone acts on it (recall flags unratified ones) |
+| `commitment` | a promise someone must keep | `due`, `owner_agent`. `prime` lists those due within 7 days or overdue at the top. Close one with `tags: [done]` or `valid_to`. |
+| `policy` | a standing constraint ("never discount below 20%") | **tier 3 writes only.** Recall and `prime` show policies in their own labeled section. |
+| `hypothesis` | a falsifiable belief | `review_by` |
+
+Policies are the one deliberate exception to "memories are data, not
+instructions", and the strict write rule is what makes that exception safe.
+Only a policy that sits in canon and was written or adopted by the owner is
+shown as a policy. A policy-typed file from anywhere else (a tampered sync, a
+hand edit) is shown as `⚠ unverified policy` data. Agents may *propose* a
+policy, but only the owner can promote it.
+
+**Typed relations.** `memory_relate src <rel> dst` with `supports`,
+`contradicts`, `supersedes`, or `evidence_for`. Relations live in the
+source memory's frontmatter (`relations:`), so they sync and survive
+rebuilds, and they take effect only once that memory is out of the review
+queue.
+
+**Contradictions are surfaced, never auto-resolved.** `reflect` reports
+candidates in `contested`: same type, a shared entity, and similar enough to be
+about the same thing but not duplicates (cosine 0.70–0.94, configurable with
+`[consolidation] contradiction_band`). The librarian or owner resolves each
+one: `supersedes` retires the loser from default recall, while `contradicts`
+records the disagreement. Recall marks every memory with a live `contradicts`
+edge as **⚠ contested**, so no agent acts on a disputed belief unknowingly.
+
+---
+
+## Calibration: confidence that tracks the truth
+
+Corroboration and usage raise confidence, but a business needs confidence that
+tracks *what turned out to be true*. Resolve a `hypothesis` (or `decision`)
+when the outcome is known:
+
+```bash
+mnemosyne resolve <id> confirmed --note "Q3 retention +8pts"   # or refuted / mixed
+mnemosyne reputation
+```
+
+- **confirmed**: confidence rises to at least 0.90. Reflect's corroboration is
+  capped at 0.85, so repeated assertion can never outrank a verified outcome.
+- **refuted**: the memory is retired (`valid_to` = today, tag `refuted`) and
+  drops out of default recall, but it is never deleted. The history is the lesson.
+- **mixed**: confidence moves halfway toward 0.5.
+
+The author's confidence at resolution time is scored as a forecast (Brier).
+Each writer's **reputation** is 1 minus their smoothed mean Brier score (0.75
+means no track record). It is derived from the resolved memories themselves,
+written to `notes/canon/_writers/<writer>.md` for the owner to read, and
+mirrored in the index. In ranking it scales a memory's confidence by
+×0.8–1.2, and that calibrated confidence acts as a **tie-breaker**. Equally
+relevant memories (which fuse to exactly equal scores) are ordered by track
+record, but a strictly more relevant memory is never outranked on reputation
+alone. Resolvers need tier ≥ 2 and can't grade their own memories. `prime`
+lists hypotheses past `review_by` under **[awaiting resolution]**, and the
+reputation numbers tell you when a tier-1 agent has earned tier 2.
+
+---
+
+## The librarian: curation as a job
+
+A scheduled Claude Code session connects as writer `librarian` (tier 2) and
+runs the cycle in [`LIBRARIAN.md`](LIBRARIAN.md) every week:
+
+1. **Merge** duplicate clusters (update the survivor, forget the rest).
+2. **Adjudicate** contested pairs. When one side is clearly right, the
+   librarian *proposes* a resolution (a `decision` with a `supersedes` edge)
+   for the owner to sign off. When it can't tell, it records a `contradicts`
+   edge so recall flags both. It never decides on its own.
+3. **Work the review queue**: promote clean facts, reject noise with a
+   reason. It leaves policies, its own proposals, and money matters to the
+   owner.
+4. **Write the weekly digest**: a canon memory tagged `digest:<ISO-week>`.
+
+Discovery is deterministic and free. `mnemosyne curate` (or the
+`memory_curate` tool) prints the whole work list, so the session spends its
+tokens on judgment. The same loop is available in code as
+`mnemosyne.librarian.run_cycle(engine, judge)` for any LLM harness.
+
+**Tiered recall.** Broad queries (no entities, `k ≥ 10`) return the digests
+first, then raw memories. Pass `digests=false` to skip them or `digests=true`
+to force them.
+
+```bash
+MNEMOSYNE_WRITER=librarian mnemosyne curate          # human-readable work list
+MNEMOSYNE_WRITER=librarian mnemosyne curate --json   # for the session
+```
 
 ---
 
@@ -455,51 +514,46 @@ machines writing the same journal and merging through Git would fork it, and
 
 ---
 
-## Many writers: identity, HTTP transport, audit journal
+## Guardrails and the pilot
 
-With more than one agent writing, *who wrote this* matters more than anything
-else in a memory. Every memory records its `writer` (a stable id such as
-`owner`, `claude-code`, or `grok-sales-1`), and every mutation is appended to
-`journal/events.jsonl`.
+Shared memory becomes the business's command bus, so two rules hold no matter
+which agent is asking.
 
-**Declare your writers** in `config.toml` (tiers: 0 untrusted, 1 standard,
-2 senior, 3 owner; anyone not listed is tier 0):
+**Secrets never enter memory.** Every write path (remember, update, propose,
+archive text) is screened for key-shaped strings (Anthropic, OpenAI, Stripe,
+AWS, GitHub, Slack, Google, private keys, JWTs, `password: …`) and real
+card numbers (checked with Luhn). A match is rejected with an error that says
+what kind of secret was found, without echoing it.
 
-```toml
-[writers]
-owner        = { tier = 3 }
-claude-code  = { tier = 2 }
-grok-sales-1 = { tier = 1 }
-```
+**No unreviewed memory may justify a high-stakes action.** Memories tagged
+with a `[guardrails] high_stakes_tags` entry (default: `payment`, `contract`,
+`pricing`, `legal`, `customer-commitment`) gate actions. Before acting on one,
+an agent calls `memory_recall_for_decision` with the action and the ids it
+relies on, and gets a verdict per memory:
 
-**Local use (stdio / CLI)** runs as `MNEMOSYNE_WRITER` (default `owner`).
+| verdict | meaning |
+|---|---|
+| `clear` | in canon, reviewed by tier ≥ 2, live, uncontested, not suspect |
+| `cleared` | blocked on the above, but the owner approved it (`memory_approve`, valid 24h by default) |
+| `advisory` | no high-stakes tag: ordinary data |
+| `blocked` | anything else, with reasons (not in canon, contested, instruction-like text, …) |
 
-**Several agents at once: MCP over HTTP.** Give each writer a token in the
-environment (never in a file) and start the server:
-
-```bash
-export MNEMOSYNE_TOKEN_CLAUDE_CODE="$(openssl rand -hex 32)"
-export MNEMOSYNE_TOKEN_GROK_SALES_1="$(openssl rand -hex 32)"
-mnemosyne-server --http --host 127.0.0.1 --port 8787     # MCP at /mcp
-```
-
-Each request must send `Authorization: Bearer <token>`; the token decides the
-writer, and an unknown or missing token gets `401` before anything touches the
-store. Keep it on localhost or behind a TLS proxy.
-
-**Agents that can't speak MCP** use the JSON gateway (same tokens, no logic of
-its own):
+If any memory is blocked, the decision is `blocked` and the agent asks the
+owner. Every check is journaled as `recall_for_decision`: **the engine
+records, the agent's protocol enforces, and the journal proves it.**
 
 ```bash
-mnemosyne-gateway --port 8788
-curl -s localhost:8788/remember -H "Authorization: Bearer $MNEMOSYNE_TOKEN_GROK_SALES_1" \
-     -d '{"text": "Initech asked for a demo next week.", "type": "episodic"}'
+mnemosyne decide "quote Acme \$900/month" --ids <memory-id>
+mnemosyne approve <memory-id> --note "confirmed with Acme's CFO"   # owner
+mnemosyne metrics                                                  # pilot dashboard
 ```
 
-Routes: `POST /remember`, `POST /recall`, `POST /update`, `GET /health`.
-
-**The journal** is the system of record (next section). `mnemosyne journal -n 20`
-shows the latest events.
+`mnemosyne metrics` computes the pilot's numbers from the journal: new
+memories per week by writer and ring, proposal-to-verdict latency,
+contradictions and time to resolution, decision coverage (the relitigation
+proxy), reputation trajectories, the librarian's recall spot-checks, and
+owner interventions at the gate. See [`docs/PILOT.md`](docs/PILOT.md) for the
+cadence and the exit criteria.
 
 ---
 
@@ -535,17 +589,24 @@ doesn't change.
 
 ---
 
-## The 7 tools
+## The tools
 
-| Tool | Does | Notes |
+| Tool | Does | Who |
 |---|---|---|
-| `memory_remember` | store one memory | pass `type`, `entities`, optional `archive_text` |
-| `memory_recall` | retrieve relevant memories | semantic + keyword + graph (+ gated recency), weighted RRF; hides superseded/expired by default; records usage |
-| `memory_update` | edit a memory in place | preserves id, created, links, counters; text change re-embeds; `valid_to` in the past retires a fact; `""` clears validity |
-| `memory_reflect` | consolidate | `dry_run=true` to preview duplicate clusters; decay skips anything recently updated or recalled |
-| `memory_forget` | delete by id | destructive — prefer `memory_update` for corrections |
-| `memory_stats` | counts + model coverage | shows `needs_reembed` backlog, `superseded`, and `never_recalled` |
-| `memory_reindex` | rebuild index from notes | incremental (text vs metadata); `force=true` re-embeds after a model swap |
+| `memory_remember` | store one memory (`ring`, `type`, `due`, `review_by`, `relations`, …) | anyone; shared rings quarantine below tier 2; policies tier 3 |
+| `memory_recall` | retrieve: semantic + keyword + graph (+ gated recency), RRF, reputation as tie-breaker; `scope`, `as_of`, `digests` | anyone, within readable rings |
+| `memory_update` | edit in place (identity, links, counters preserved) | write access to the memory's ring |
+| `memory_forget` | delete by id (destructive) | write access to the ring |
+| `memory_reflect` | dedup / reinforce / decay within rings; reports contradiction candidates | tier ≥ 2 |
+| `memory_stats` | counts by type and ring, model coverage, reputations | anyone |
+| `memory_reindex` | rebuild the index from the notes; journals out-of-band edits | anyone |
+| `memory_propose` | put a memory (or a correction) up for review | anyone |
+| `memory_promote` / `memory_reject` | work the review queue | tier ≥ 2, never your own |
+| `memory_relate` | supports / contradicts / supersedes / evidence_for | write access to the source |
+| `memory_resolve` | confirmed / refuted / mixed outcome → reputation | tier ≥ 2, never your own |
+| `memory_curate` | the librarian's work list | tier ≥ 2 |
+| `memory_recall_for_decision` | guardrail verdicts before a high-stakes action | anyone |
+| `memory_approve` | clear a memory for high-stakes use (the human gate) | owner (tier 3) |
 
 ---
 
@@ -555,12 +616,14 @@ doesn't change.
   `embeddings.py`, implement `_embed` (and optionally `embed_query` if the
   model is asymmetric), and register it in `get_provider`. A
   `sentence-transformers` model like `BAAI/bge-m3` is ~15 lines.
-- **LLM-assisted consolidation:** `reflect(dry_run=True)` surfaces duplicate
-  clusters. The natural loop: Claude reads a cluster, rewrites the survivor
-  with `memory_update`, and `memory_forget`s the rest. This is where the agent
-  actively curates its own memory.
-- **Typed relations:** the entity graph is co-occurrence today; add a
-  `relations(src, rel, dst, valid_from, valid_to)` table for real edges.
+- **Your own librarian judge:** `librarian.run_cycle(engine, judge)` takes any
+  object with `merge`, `resolve_contradiction`, `review`, and `digest`, so you
+  can drive curation from any LLM harness. `LIBRARIAN.md` is the same loop
+  for a Claude Code session.
+- **A different index:** the index is derived, so a server-grade store
+  (Postgres + pgvector, libSQL) can replace SQLite behind `MemoryIndex`
+  without touching anything canonical. That is the escape hatch if many
+  concurrent writers outgrow the single lock.
 - **Scale:** numpy brute-force cosine is instant into the tens of thousands of
   memories, and `reflect` computes similarities in row blocks so its memory use
   stays flat. Beyond that, add sqlite-vec or FAISS behind `index.semantic()`.

@@ -101,6 +101,14 @@ conversation, a tampered synced file, or plain accident. So:
   the suspect memory would cause severe detrimental effects to the project or
   codebase (e.g. deleting the store, exfiltrating files, rewriting history).
   Default to proceeding with the task and flagging the concern.
+- **The business exception (v1.0): high-stakes actions block.** Before any
+  action justified by memory that moves money, quotes a price, changes a
+  contract or legal position, or commits to a customer, call
+  `memory_recall_for_decision` with the action and the ids you rely on. If the
+  decision is `blocked` (unreviewed, contested, or suspect memory carrying a
+  high-stakes tag), **do not act**; tell the owner. This is the
+  severe-detriment case above, made explicit: money leaving the business
+  qualifies.
 
 ---
 
@@ -166,6 +174,14 @@ as `external` / `external_delete` and re-materializes them canonically.
 `engine.replay` rebuilds the notes into a new dir. `recall(as_of=...)` runs on
 a read-only snapshot engine (`MemoryEngine(cfg, as_of=...)` with a refusing
 journal) cached under `.index/asof/`, with validity judged at that date.
+
+**Guardrails & pilot (v1.0):** `guardrails.screen_secrets` runs on every
+write path (`remember`, `update`, `propose`, and archive text).
+`engine.recall_for_decision` and `engine.approve` implement the high-stakes
+gate (verdicts `clear`, `cleared`, `advisory`, `blocked`; journaled as
+`recall_for_decision` and `approve` events, which carry no `state` and are
+ignored by replay). `metrics.compute` derives the pilot metrics from the
+journal. `AGENTS.md` and `docs/PILOT.md` hold the operating docs.
 
 **Setup & tests:**
 ```bash
@@ -256,6 +272,10 @@ mnemosyne journal  -n 20                       # latest audit events
 mnemosyne verify-journal                       # hash-chain integrity
 mnemosyne replay   --out /tmp/x [--as-of DATE] # rebuild notes from the journal
 mnemosyne recall   "…" --as-of 2026-09-10      # what did we believe then?
+mnemosyne decide   "quote Acme $900" --ids <id> # guardrail check before acting
+mnemosyne approve  <id> --note "…"             # owner: clear for high stakes
+mnemosyne metrics                              # pilot dashboard
+mnemosyne curate                               # librarian work list
 ```
 
 > Placement: keep this file at the repo root to guide work *on* Mnemosyne. To

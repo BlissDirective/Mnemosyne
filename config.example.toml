@@ -52,6 +52,13 @@ owner        = { tier = 3 }
 # grok-sales-1 = { tier = 1, teams = ["sales"] }   # may write team:sales directly;
 #                                                  # canon writes are quarantined
 
+[guardrails]
+# Memories carrying any of these tags gate actions: before acting on one, an
+# agent calls memory_recall_for_decision; unreviewed, contested, or suspect
+# ones block until the owner clears them (memory_approve).
+high_stakes_tags = ["payment", "contract", "pricing", "legal", "customer-commitment"]
+approval_hours   = 24      # how long an owner approval lasts
+
 [http]
 # `mnemosyne-server --http` serves MCP (streamable HTTP) at http://host:port/mcp;
 # every request must carry `Authorization: Bearer <token>`.

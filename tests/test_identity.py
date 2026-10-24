@@ -266,8 +266,8 @@ def test_every_mutation_is_journaled_and_replays(tmp_path):
     eng = make_engine(tmp_path, counter_flush_every=1)
     a = eng.remember("The user lives in Berlin.", type="world_fact", writer="claude-code",
                      ring="canon")
-    b = eng.remember("The user lives in Berlin.", type="world_fact", writer="owner",
-                     ring="canon")
+    eng.remember("The user lives in Berlin.", type="world_fact", writer="owner",
+                 ring="canon")
     c = eng.remember("Temporary note.", type="episodic")
     eng.update(a.id, tags=["home"], writer="owner")
     eng.recall("where does the user live?")          # counter flush -> 'access'

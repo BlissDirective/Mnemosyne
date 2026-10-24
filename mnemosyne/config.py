@@ -73,6 +73,12 @@ class Config:
                                       # over HTTP the bearer token decides
     writers: Dict[str, WriterSpec] = field(default_factory=_default_writers)
 
+    # guardrails (Phase 7): memories carrying any of these tags gate actions —
+    # see guardrails.py and memory_recall_for_decision
+    high_stakes_tags: List[str] = field(default_factory=lambda: [
+        "payment", "contract", "pricing", "legal", "customer-commitment"])
+    approval_hours: int = 24          # how long an owner approval (memory_approve) lasts
+
     # HTTP transport
     http_host: str = "127.0.0.1"
     http_port: int = 8787
@@ -146,6 +152,11 @@ def load_config(root: Optional[str] = None) -> Config:
     if "writers" in data:
         cfg.writers = _parse_writers(data["writers"])
     cfg.writer = os.environ.get("MNEMOSYNE_WRITER", cfg.writer).strip() or cfg.writer
+
+    gr = data.get("guardrails", {})
+    if "high_stakes_tags" in gr:
+        cfg.high_stakes_tags = [str(t).strip().lower() for t in gr["high_stakes_tags"]]
+    cfg.approval_hours = int(gr.get("approval_hours", cfg.approval_hours))
 
     http = data.get("http", {})
     cfg.http_host = str(http.get("host", cfg.http_host))

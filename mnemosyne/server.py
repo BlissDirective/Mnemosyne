@@ -17,6 +17,8 @@ Code) can persist and retrieve memory across sessions:
     memory_relate     typed edges: supports / contradicts / supersedes / evidence_for
     memory_resolve    record a hypothesis/decision outcome; updates writer reputation
     memory_curate     the librarian's work list (see LIBRARIAN.md)
+    memory_recall_for_decision   guardrail gate before high-stakes actions
+    memory_approve    owner: clear a memory for high-stakes use (human gate)
 
 Rings (see rings.py): private:<writer> | team:<name> | proposed | canon.
 Low-trust writers' shared writes are quarantined into `proposed`.
@@ -213,6 +215,28 @@ class ResolveInput(BaseModel):
     outcome: str = Field(..., description="confirmed | refuted | mixed")
     note: Optional[str] = Field(default=None, max_length=1000,
                                 description="Evidence for the outcome (what happened).")
+
+
+class DecisionInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    action: str = Field(..., min_length=3, max_length=1000,
+                        description="The action you are about to take, concretely "
+                                    "(e.g. 'quote Acme $900/month for renewal').")
+    query: Optional[str] = Field(default=None, max_length=2000,
+                                 description="Recall the memories this action relies on.")
+    ids: List[str] = Field(default_factory=list, max_length=32,
+                           description="Specific memory ids the action relies on.")
+    entities: List[str] = Field(default_factory=list)
+    k: int = Field(default=8, ge=1, le=30)
+
+
+class ApproveInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    id: str = Field(..., min_length=3, description="Memory to clear for high-stakes use.")
+    note: str = Field(..., min_length=3, max_length=1000,
+                      description="Why it is OK to act on it (recorded in the journal).")
 
 
 class CurateInput(BaseModel):
@@ -466,6 +490,45 @@ def memory_resolve(params: ResolveInput) -> str:
                            "author_reputation": {mem.writer: rep}}, indent=2)
     except Exception as e:
         return f"Error resolving memory: {type(e).__name__}: {e}"
+
+
+@mcp.tool(
+    name="memory_recall_for_decision",
+    annotations={"title": "Check memory before acting", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def memory_recall_for_decision(params: DecisionInput) -> str:
+    """Call this BEFORE any action justified by memory that moves money, makes
+    a commitment to a customer, quotes a price, or touches a contract or legal
+    matter. Every memory the action relies on gets a verdict: `clear`
+    (reviewed canon, live, uncontested), `cleared` (owner-approved), `advisory`
+    (not high-stakes; ordinary data), or `blocked` with reasons. If the
+    decision is `blocked`, do not act — ask the owner. Pass `ids` for the
+    memories you actually rely on (precise); `query` evaluates the top recall
+    hits, which may include loosely related high-stakes memories that block.
+    The check is journaled."""
+    try:
+        out = engine().recall_for_decision(
+            params.action, query=params.query, ids=params.ids, k=params.k,
+            entities=params.entities or None, writer=caller())
+        return json.dumps(out, indent=2)
+    except Exception as e:
+        return f"Error checking memories: {type(e).__name__}: {e}"
+
+
+@mcp.tool(
+    name="memory_approve",
+    annotations={"title": "Owner approval", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def memory_approve(params: ApproveInput) -> str:
+    """Owner only (tier 3): explicitly clear one memory for high-stakes use for
+    the configured window (default 24h) — the human gate. Changes no memory;
+    the approval is recorded in the journal."""
+    try:
+        return json.dumps(engine().approve(params.id, params.note, writer=caller()), indent=2)
+    except Exception as e:
+        return f"Error approving: {type(e).__name__}: {e}"
 
 
 @mcp.tool(

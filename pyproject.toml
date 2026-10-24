@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemosyne-memory"
-version = "0.9.0"
-description = "Local-first, portable, evolutionary memory engine for AI agents (MCP)."
+version = "1.0.0"
+description = "Shared, governed memory for teams of AI agents from any vendor: local-first Markdown, rings and review, calibration, a hash-chained journal (MCP + HTTP)."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
