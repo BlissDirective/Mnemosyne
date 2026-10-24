@@ -1,0 +1,17 @@
+# The derived index is a rebuildable cache — never sync it. Rebuild with:
+#   python -m mnemosyne.cli reindex
+.index/
+
+# Local config may hold provider/model choices; keep secrets in env, not here.
+config.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# OS
+.DS_Store

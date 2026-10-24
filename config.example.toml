@@ -1,0 +1,37 @@
+# Mnemosyne configuration.
+# Copy to your memory home as config.toml, e.g.  ~/mnemosyne/config.toml
+# Every value has a default, so this file is entirely optional.
+
+[embedding]
+# provider: "dev" (offline, zero-setup) | "openai" | "voyage"
+#   - "dev"    deterministic hashing embeddings. Great for trying things out or
+#              air-gapped use. Not competitive with real models for quality.
+#   - "openai" needs OPENAI_API_KEY. Default model: text-embedding-3-large (3072d).
+#   - "voyage" needs VOYAGE_API_KEY. Default model: voyage-3-large.
+#              Queries are embedded with input_type="query" (asymmetric).
+provider = "dev"
+
+# model: override the provider's default model (optional)
+# model = "text-embedding-3-large"
+
+# dim: optional dimension override. OpenAI text-embedding-3-* support Matryoshka
+# truncation (e.g. 1024) to shrink storage with little quality loss.
+# dim = 1024
+
+[retrieval]
+recall_k       = 8     # memories returned per recall by default
+candidate_k    = 40    # candidates each strategy contributes before fusion
+rrf_k          = 60    # Reciprocal Rank Fusion constant (higher = flatter weighting)
+recency_weight = 0.3   # recency's fusion weight; it only runs at all when the
+                       # query has temporal cues ("recent", "last week", ...)
+
+[access]
+flush_every = 10       # recall hits to batch before writing recall_count /
+                       # last_recalled back to the canonical files (1 = every
+                       # recall). Counters also flush on close/reflect/reindex.
+
+[consolidation]
+dedup_threshold    = 0.94  # cosine >= this (same type) => treated as near-duplicate
+decay_per_reflect  = 0.0   # >0 slowly lowers confidence of stale, unlinked memories
+decay_min_age_days = 30    # decay-eligible only if neither updated nor recalled
+                           # within this many days (recalled memories never fade)
