@@ -78,8 +78,8 @@ def test_reputation_affects_ranking_boundedly(tmp_path):
     # 4 confident misses would be x0.63 unbounded; the floor holds it at x0.8
     assert reps["grok-bad"]["multiplier"] == pytest.approx(reputation.MULT_MIN)
 
-    # two equally relevant, equally confident claims; the earlier-written one
-    # (bad writer) would win the RRF tie on its own
+    # two equally relevant, equally confident claims: they fuse to exactly
+    # equal scores, and calibrated reputation decides
     claim_bad = eng.remember("The Globex deal closes in November.", ring="canon",
                              writer="grok-bad", entities=["Globex"])
     claim_good = eng.remember("The Globex deal closes in November.", ring="canon",
@@ -92,10 +92,11 @@ def test_reputation_affects_ranking_boundedly(tmp_path):
     prior = eng._rank_prior()
     for w in ("grok-good", "grok-bad", "never-resolved"):
         for c in (0.0, 0.5, 1.0):
-            assert 0.95 <= prior(Memory(text="x", writer=w, confidence=c)) <= 1.02
+            assert 0.98 <= prior(Memory(text="x", writer=w, confidence=c)) <= 1.01
     same = lambda w: prior(Memory(text="x", writer=w, confidence=0.7))
     assert same("grok-good") > same("never-resolved") == 1.0 > same("grok-bad")
-    # a clearly more relevant memory still beats reputation
+    # a strictly more relevant memory still beats reputation, even from the
+    # worst-calibrated writer
     relevant = eng.remember("Globex deal close date: November 14, signed by Globex CFO.",
                             ring="canon", writer="grok-bad", entities=["Globex"])
     hits = eng.recall("Globex deal close date CFO signed", entities=["Globex"], k=1)

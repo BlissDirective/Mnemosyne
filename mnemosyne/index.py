@@ -328,7 +328,7 @@ class MemoryIndex:
                 f"""SELECT e.memory_id AS memory_id, COUNT(*) AS hits FROM mem_entities e
                     JOIN memories m ON m.id = e.memory_id
                     WHERE e.entity IN ({placeholders}) {ring_sql}
-                    GROUP BY e.memory_id ORDER BY hits DESC LIMIT ?""",
+                    GROUP BY e.memory_id ORDER BY hits DESC, e.memory_id LIMIT ?""",
                 (*ents, *ring_args, k),
             ).fetchall()
         return [(r["memory_id"], float(r["hits"])) for r in rows]

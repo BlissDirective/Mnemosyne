@@ -145,9 +145,11 @@ and never resolves them.
 at, forecast, note}`. `reputation.py` derives per-writer Brier reputations
 from those fields; the engine mirrors them into the index and writes
 `notes/canon/_writers/*.md` (store iteration skips `_`-prefixed dirs).
-Ranking applies `engine._rank_prior`, a small confidence term
-(`CONFIDENCE_WEIGHT`) with reputation bounded at ×0.8–1.2. Keep it small: RRF
-scores are compressed. Corroboration is capped at
+Ranking applies `engine._rank_prior`, a tie-breaking confidence term
+(`CONFIDENCE_WEIGHT` 0.02) with reputation bounded at ×0.8–1.2. Within each
+strategy, equal raw scores share a rank (`retrieval._ranks`), so equally
+relevant memories fuse to equal scores. Keep the weight below a one-rank RRF
+gap (about 0.5%), or reputation starts overriding relevance. Corroboration is capped at
 `consolidate.REINFORCE_CAP` (0.85), below the confirmed floor (0.90).
 
 **Setup & tests:**

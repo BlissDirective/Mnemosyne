@@ -456,12 +456,14 @@ class MemoryEngine:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 path.write_text(text, encoding="utf-8")
 
-    # Weight of the confidence term in ranking. RRF scores are compressed
-    # (rank 1 vs rank 2 in one strategy is ~1.6% apart; first in all three
-    # strategies is often only ~2% ahead), so this must stay small: at 0.06
-    # the best vs worst writer at equal confidence differ by ~1.7% — enough to
-    # break near-ties, never enough to beat a clearly more relevant memory.
-    CONFIDENCE_WEIGHT = 0.06
+    # Weight of the confidence term in ranking. RRF only sees ranks, and one
+    # rank of difference in one strategy is worth just ~0.5% of a typical fused
+    # score, so this is deliberately a tie-breaker: at 0.02, the best vs the
+    # worst writer at confidence 0.7 differ by ~0.5%. Equally relevant memories
+    # (which fuse to exactly equal scores — see retrieval._ranks) are ordered
+    # by calibrated confidence; a strictly more relevant one is never
+    # overtaken on reputation alone.
+    CONFIDENCE_WEIGHT = 0.02
 
     def _rank_prior(self):
         """Confidence term for ranking, with writer reputation as a bounded

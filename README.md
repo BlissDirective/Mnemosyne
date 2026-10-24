@@ -284,9 +284,10 @@ Each writer's **reputation** is 1 minus their smoothed mean Brier score (0.75
 means no track record). It is derived from the resolved memories themselves,
 written to `notes/canon/_writers/<writer>.md` for the owner to read, and
 mirrored in the index. In ranking it scales a memory's confidence by
-×0.8–1.2, and confidence carries a small weight in the final score: enough to
-order near-ties by track record, never enough to outrank a more relevant
-memory. Resolvers need tier ≥ 2 and can't grade their own memories. `prime`
+×0.8–1.2, and that calibrated confidence acts as a **tie-breaker**. Equally
+relevant memories (which fuse to exactly equal scores) are ordered by track
+record, but a strictly more relevant memory is never outranked on reputation
+alone. Resolvers need tier ≥ 2 and can't grade their own memories. `prime`
 lists hypotheses past `review_by` under **[awaiting resolution]**, and the
 reputation numbers tell you when a tier-1 agent has earned tier 2.
 

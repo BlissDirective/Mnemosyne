@@ -54,7 +54,25 @@ def _has_temporal_cue(query: str) -> bool:
     return any(phrase in q for phrase in _TEMPORAL_CUES if " " in phrase)
 
 
-def _rrf_merge(ranked_lists: Dict[str, List[str]], k: int, rrf_k: int,
+def _ranks(items: Sequence) -> List[Tuple[str, int]]:
+    """(id, rank) pairs. Items may be bare ids (strict ranks) or (id, score)
+    pairs, in which case equal scores share a rank (competition ranking,
+    "1224"): two equally relevant memories must fuse to exactly equal scores
+    instead of being split by arbitrary tie order."""
+    out: List[Tuple[str, int]] = []
+    prev_score, prev_rank = None, 0
+    for i, item in enumerate(items):
+        if isinstance(item, tuple):
+            mid, sc = item[0], round(float(item[1]), 9)
+            rank = prev_rank if (prev_score is not None and sc == prev_score) else i
+            prev_score, prev_rank = sc, rank
+        else:
+            mid, rank = item, i
+        out.append((mid, rank))
+    return out
+
+
+def _rrf_merge(ranked_lists: Dict[str, Sequence], k: int, rrf_k: int,
                weights: Optional[Dict[str, float]] = None,
                ) -> List[Tuple[str, float, List[str]]]:
     """Weighted Reciprocal Rank Fusion. Each id scores
@@ -63,11 +81,11 @@ def _rrf_merge(ranked_lists: Dict[str, List[str]], k: int, rrf_k: int,
     weights = weights or {}
     scores: Dict[str, float] = {}
     hits: Dict[str, List[str]] = {}
-    for strategy, ids in ranked_lists.items():
+    for strategy, items in ranked_lists.items():
         w = weights.get(strategy, 1.0)
         if w <= 0:
             continue
-        for rank, mid in enumerate(ids):
+        for mid, rank in _ranks(items):
             scores[mid] = scores.get(mid, 0.0) + w / (rrf_k + rank)
             hits.setdefault(mid, []).append(strategy)
     fused = sorted(scores.items(), key=lambda kv: -kv[1])
@@ -104,24 +122,24 @@ class Retriever:
         superseded = superseded or set()
         contested = contested or {}
         ck = self.candidate_k
-        ranked: Dict[str, List[str]] = {}
+        ranked: Dict[str, Sequence] = {}
 
         # 1) semantic — queries go through embed_query so asymmetric providers
         #    (Voyage) embed them as queries, not documents
         try:
             qv = self.provider.embed_query(query)
             sem = self.index.semantic(qv, ck, types=types, rings=rings)
-            ranked["semantic"] = [mid for mid, _ in sem]
+            ranked["semantic"] = sem
         except Exception:
             ranked["semantic"] = []  # e.g. no API key -> degrade to keyword/graph
 
         # 2) keyword / BM25
-        ranked["keyword"] = [mid for mid, _ in self.index.keyword(query, ck, rings=rings)]
+        ranked["keyword"] = self.index.keyword(query, ck, rings=rings)
 
         # 3) graph expansion (entities the caller flagged, or words in the query)
         ents = list(entities) if entities else _guess_entities(query)
         if ents:
-            ranked["graph"] = [mid for mid, _ in self.index.graph(ents, ck, rings=rings)]
+            ranked["graph"] = self.index.graph(ents, ck, rings=rings)
 
         # 4) temporal / recency prior — gated on temporal cues (or explicit
         #    use_recency=True), and down-weighted in fusion either way
