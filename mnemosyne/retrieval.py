@@ -112,7 +112,8 @@ class Retriever:
                superseded: Optional[Set[str]] = None,
                contested: Optional[Mapping[str, List[str]]] = None,
                prior: Optional[Callable[[Memory], float]] = None,
-               only: Optional[Set[str]] = None) -> List[Hit]:
+               only: Optional[Set[str]] = None,
+               today: Optional[str] = None) -> List[Hit]:
         """`rings` restricts every strategy to those rings (None = no ring
         filter; the engine always passes the caller's resolved scope).
         `superseded` ids (targets of a live `supersedes` relation) are hidden
@@ -120,7 +121,9 @@ class Retriever:
         and is attached to each hit so nobody acts on it unknowingly.
         `prior(memory)` is a bounded multiplier on each fused score (the
         engine's confidence term, nudged by writer reputation). `only`
-        restricts every strategy to those ids (used for digest-first recall)."""
+        restricts every strategy to those ids (used for digest-first recall).
+        `today` (ISO date) judges validity at another moment (as-of recall):
+        facts not yet valid then (valid_from later) are hidden too."""
         superseded = superseded or set()
         contested = contested or {}
         ck = self.candidate_k
@@ -171,8 +174,10 @@ class Retriever:
                     continue
                 if mem.id in superseded:  # a reviewed memory supersedes it
                     continue
-                if mem.is_retired():      # past its valid_to, or refuted
+                if mem.is_retired(today):  # past its valid_to, or refuted
                     continue
+                if today and mem.valid_from and str(mem.valid_from)[:10] > today:
+                    continue              # as-of: the fact did not hold yet
             hits.append(Hit(memory=mem, score=score, strategies=strategies,
                             contested_with=list(contested.get(mem.id, []))))
             if len(hits) >= k:

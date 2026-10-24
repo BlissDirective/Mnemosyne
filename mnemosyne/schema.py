@@ -191,6 +191,13 @@ class Memory:
                 d.pop(k)
         if not d.get("recall_count"):
             d.pop("recall_count", None)
+        # nested dicts get a canonical key order, so a memory serializes to
+        # the same bytes whether it came from code, a file, or the journal
+        if "relations" in d:
+            d["relations"] = [{k: r[k] for k in ("rel", "id", "note") if k in r}
+                              for r in d["relations"]]
+        if d.get("resolution") is not None:
+            d["resolution"] = {k: d["resolution"][k] for k in sorted(d["resolution"])}
         text = d.pop("text")  # text lives in the body, not frontmatter
         return d, text
 

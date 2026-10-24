@@ -159,6 +159,14 @@ and `LIBRARIAN.md` is the runbook for the scheduled session. Digests are canon
 first for broad queries (`_is_broad`: no entities, `k >= broad_k`) through
 the retriever's `only=` id filter.
 
+**Event sourcing (v0.9):** the journal is sharded monthly
+(`journal/events-YYYY-MM.jsonl`, after the legacy `events.jsonl`) and
+hash-chained under an OS file lock. `sync` journals out-of-band note changes
+as `external` / `external_delete` and re-materializes them canonically.
+`engine.replay` rebuilds the notes into a new dir. `recall(as_of=...)` runs on
+a read-only snapshot engine (`MemoryEngine(cfg, as_of=...)` with a refusing
+journal) cached under `.index/asof/`, with validity judged at that date.
+
 **Setup & tests:**
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -208,9 +216,12 @@ python tests/live_stdio_check.py      # spawns the real server over stdio
 - Don't commit `.index/` or `config.toml` (see `.gitignore`). Secrets live in
   env vars (`OPENAI_API_KEY`, `VOYAGE_API_KEY`), never in files.
 - Every code path that writes a memory file goes through the engine and
-  appends a journal event (with the full `state`) first — including reflect's
-  edits (`persist` hook) and counter flushes. Replaying the journal must
-  reproduce `notes/` (tested). Never rewrite or truncate the journal.
+  appends a journal event (with the full `state`) first, including reflect's
+  edits (the `persist` hook) and counter flushes. `replay` must reproduce
+  `notes/` byte for byte (tested), so any new frontmatter field needs a
+  canonical serialization (nested dicts get a fixed key order in
+  `Memory.frontmatter`). Never rewrite or truncate the journal: it is
+  hash-chained (`journal.verify`).
 - The engine is serialized by one `RLock`; store writes are atomic
   (temp file + rename). Keep the hammer tests in `tests/test_identity.py` green.
 - Tokens live only in `MNEMOSYNE_TOKEN_<WRITER>` env vars, never in files.
@@ -242,6 +253,9 @@ mnemosyne recall   "…" --scope all             # every ring you may read
 mnemosyne queue                                # proposals awaiting review
 mnemosyne promote  <id>  |  reject <id> --reason "…"
 mnemosyne journal  -n 20                       # latest audit events
+mnemosyne verify-journal                       # hash-chain integrity
+mnemosyne replay   --out /tmp/x [--as-of DATE] # rebuild notes from the journal
+mnemosyne recall   "…" --as-of 2026-09-10      # what did we believe then?
 ```
 
 > Placement: keep this file at the repo root to guide work *on* Mnemosyne. To

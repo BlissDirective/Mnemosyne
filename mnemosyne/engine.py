@@ -21,8 +21,10 @@ read-modify-write.
 
 from __future__ import annotations
 
+import dataclasses
+import shutil
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -36,10 +38,12 @@ from .embeddings import get_provider, EmbeddingProvider
 from .index import MemoryIndex, reindex
 from .retrieval import Retriever, Hit
 from .consolidate import reflect, ReflectReport
-from .journal import Journal
+from .journal import Journal, last_hashes, replay_states
 
 # writer id used for engine-internal maintenance (counter flushes)
 SYSTEM_WRITER = "system"
+# writer id recorded for changes made to the notes outside the engine
+EXTERNAL_WRITER = "external"
 DIGEST_TAG = "digest:"   # librarian digests are tagged digest:<ISO-week>
 
 
@@ -49,8 +53,11 @@ def iso_week(d: date) -> str:
 
 
 class MemoryEngine:
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Config] = None, as_of: Optional[str] = None):
+        """`as_of` (internal) makes a read-only engine over a replayed
+        snapshot: validity is judged at that moment and every write refuses."""
         self.cfg = config or load_config()
+        self.as_of = as_of
         self.cfg.ensure_dirs()
         self.store = MarkdownStore(self.cfg.notes_dir, self.cfg.archive_dir)
         self.provider: EmbeddingProvider = get_provider(
@@ -60,7 +67,8 @@ class MemoryEngine:
             self.store, self.index, self.provider,
             candidate_k=self.cfg.candidate_k, rrf_k=self.cfg.rrf_k,
             recency_weight=self.cfg.recency_weight)
-        self.journal = Journal(self.cfg.journal_dir)
+        self.journal = Journal(self.cfg.journal_dir) if as_of is None else _NoJournal()
+        self._snapshots: Dict[str, "MemoryEngine"] = {}
         self._lock = threading.RLock()
         # pending access-counter write-backs: id -> (delta, last_recalled_ts)
         self._pending_access: Dict[str, List] = {}
@@ -84,16 +92,96 @@ class MemoryEngine:
     # ---- lifecycle -------------------------------------------------------
     def sync(self, force: bool = False) -> Dict[str, int]:
         """Reconcile the derived index with the canonical notes (and rebuild
-        the derived writer reputations from the resolved memories)."""
+        the derived writer reputations from the resolved memories). Notes that
+        changed outside the engine (hand edits, a `git pull`) are recorded in
+        the journal as `external` / `external_delete` events, so the journal
+        stays a complete record and replay stays exact."""
         with self._lock:
             self.flush_access()
             result = reindex(self.store, self.index, self.provider, force=force)
             self._rebuild_reputations()
+            if self.as_of is None:
+                result["journaled_external"] = self._reconcile_journal()
             return result
+
+    # ---- event sourcing -------------------------------------------------------
+    def _reconcile_journal(self) -> int:
+        known = last_hashes(self.journal.events())
+        on_disk = set()
+        n = 0
+        for mem in self.store.iter_memories():
+            on_disk.add(mem.id)
+            if known.get(mem.id) != (mem.hash, mem.meta_hash):
+                self.journal.append("external", EXTERNAL_WRITER, mem=mem)
+                # re-materialize in canonical form (filename slug, YAML
+                # layout) so notes/ stays exactly the journal's current state
+                self.store.write(mem)
+                n += 1
+        for mid in set(known) - on_disk:
+            self.journal.append("external_delete", EXTERNAL_WRITER, mid)
+            n += 1
+        return n
+
+    def replay(self, out_dir: Path, as_of: Optional[str] = None) -> Dict[str, object]:
+        """Rebuild the notes from the journal into `out_dir` (a fresh store
+        root: out_dir/notes/...), as of a moment or in full. The owner's
+        notes/ are never touched. Returns counts and the cut-off used."""
+        until = normalize_as_of(as_of) if as_of else None
+        out_dir = Path(out_dir)
+        notes = out_dir / "notes"
+        if notes.exists() and any(notes.rglob("*.md")):
+            raise ValueError(f"{notes} already has notes; replay into an empty directory")
+        with self._lock:
+            self.flush_access()
+            events = list(self.journal.events(until=until))
+        states = replay_states(events)
+        store = MarkdownStore(notes, out_dir / "archive")
+        for mem in states.values():
+            store.write(mem)
+        _write_reputation_pages(notes, reputation_mod.compute(states.values()))
+        return {"memories": len(states), "events": len(events), "as_of": until,
+                "out": str(out_dir)}
+
+    def verify_journal(self) -> Dict[str, object]:
+        return self.journal.verify()
+
+    def _snapshot(self, as_of: str) -> "MemoryEngine":
+        """A read-only engine over the store as it was at `as_of` (journal
+        time), cached under .index/asof/ (derived, rebuildable) and reused
+        while the journal up to that moment is unchanged."""
+        until = normalize_as_of(as_of)
+        events = list(self.journal.events(until=until))
+        head = events[-1].get("hash", str(len(events))) if events else "empty"
+        key = until.replace(":", "").replace("+", "p")
+        cached = self._snapshots.get(key)
+        if cached is not None and getattr(cached, "_head", None) == head:
+            return cached
+        root = self.cfg.index_dir / "asof" / key
+        marker = root / "HEAD"
+        if not (marker.exists() and marker.read_text() == head):
+            if root.exists():
+                shutil.rmtree(root)
+            states = replay_states(events)
+            store = MarkdownStore(root / "notes", root / "archive")
+            for mem in states.values():
+                store.write(mem)
+        cfg = dataclasses.replace(self.cfg, root=root)
+        snap = MemoryEngine(cfg, as_of=until)
+        snap.sync()
+        marker.write_text(head)
+        snap._head = head
+        old = self._snapshots.pop(key, None)
+        if old is not None:
+            old.index.close()
+        self._snapshots[key] = snap
+        return snap
 
     def close(self) -> None:
         with self._lock:
             self.flush_access()
+            for snap in self._snapshots.values():
+                snap.index.close()
+            self._snapshots.clear()
             self.index.close()
 
     # ---- operations ------------------------------------------------------
@@ -351,14 +439,25 @@ class MemoryEngine:
                record_access: bool = True,
                writer: Optional[str] = None,
                scope: Optional[Sequence[str]] = None,
-               digests: Optional[bool] = None) -> List[Hit]:
+               digests: Optional[bool] = None,
+               as_of: Optional[str] = None) -> List[Hit]:
         """Recall within `scope` (default: canon + the caller's private ring +
         their teams; 'all' = every ring the caller may read).
 
         Tiered: for broad queries (no entities given or detected, and k >=
         `broad_k`) — or when digests=True — the librarian's weekly digests
         (tag `digest:<ISO-week>`) come first, then raw memories fill the rest.
-        digests=False always goes straight to raw memories."""
+        digests=False always goes straight to raw memories.
+
+        `as_of` (ISO date or timestamp) answers "what did we believe then?":
+        recall runs against the memory as the journal says it stood at that
+        moment, and validity (valid_from / valid_to) is judged at that date —
+        bitemporal: what was true then, as known then. Counters untouched."""
+        if as_of and self.as_of is None:
+            return self._snapshot(as_of).recall(
+                query, k=k, types=types, entities=entities,
+                include_superseded=include_superseded, record_access=False,
+                writer=writer, scope=scope, digests=digests)
         ident = self.identity(writer)
         k = k or self.cfg.recall_k
         with self._lock:
@@ -367,7 +466,7 @@ class MemoryEngine:
             kw = dict(types=types, entities=entities,
                       include_superseded=include_superseded, rings=allowed,
                       superseded=superseded, contested=contested,
-                      prior=self._rank_prior())
+                      prior=self._rank_prior(), today=self._today())
             hits: List[Hit] = []
             if digests or (digests is None and self._is_broad(query, entities, k)):
                 digest_ids = {mid for mid, _ in
@@ -547,13 +646,7 @@ class MemoryEngine:
         where the content changed. Derived, so it can always be rebuilt."""
         reps = reputation_mod.compute(self.store.iter_memories())
         self.index.set_reputations({w: r.to_json() for w, r in reps.items()})
-        out_dir = self.cfg.notes_dir / "canon" / "_writers"
-        for w, r in reps.items():
-            path = out_dir / f"{w}.md"
-            text = reputation_mod.render_markdown(r)
-            if not path.exists() or path.read_text(encoding="utf-8") != text:
-                out_dir.mkdir(parents=True, exist_ok=True)
-                path.write_text(text, encoding="utf-8")
+        _write_reputation_pages(self.cfg.notes_dir, reps)
 
     # Weight of the confidence term in ranking. RRF only sees ranks, and one
     # rank of difference in one strategy is worth just ~0.5% of a typical fused
@@ -631,9 +724,11 @@ class MemoryEngine:
             contested.setdefault(dst, []).append(src)
         return superseded, contested
 
-    @staticmethod
-    def _live(m: Memory) -> bool:
-        return not m.duplicate_of and not m.is_retired()
+    def _today(self) -> Optional[str]:
+        return self.as_of[:10] if self.as_of else None
+
+    def _live(self, m: Memory) -> bool:
+        return not m.duplicate_of and not m.is_retired(self._today())
 
     def is_verified_policy(self, m: Memory) -> bool:
         """A policy only counts as a standing instruction if it sits in canon
@@ -846,3 +941,45 @@ def _date_or_none(value: Optional[str], field_name: str) -> Optional[str]:
     except ValueError:
         raise ValueError(f"{field_name} must be an ISO date like 2026-11-01, got {value!r}")
     return v
+
+
+def normalize_as_of(value: str) -> str:
+    """ISO date or timestamp -> the journal's UTC timestamp format. A bare
+    date means the END of that day (everything known by then)."""
+    v = str(value).strip()
+    try:
+        if len(v) == 10:
+            d = date.fromisoformat(v)
+            dt = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise ValueError(f"as_of must be an ISO date or timestamp, got {value!r}")
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _write_reputation_pages(notes_dir: Path, reps) -> None:
+    out_dir = Path(notes_dir) / "canon" / "_writers"
+    for w, r in reps.items():
+        path = out_dir / f"{w}.md"
+        text = reputation_mod.render_markdown(r)
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+
+class _NoJournal:
+    """Journal stand-in for read-only (as-of) engines: every mutation journals
+    first, so refusing here refuses every write."""
+
+    def append(self, *a, **kw):
+        raise PermissionError("this is a read-only, as-of view of the memory; "
+                              "write to the live store instead")
+
+    def events(self, until=None):
+        return iter(())
+
+    def verify(self):
+        return {"ok": True, "events": 0, "legacy_events": 0, "head": None, "error": None}

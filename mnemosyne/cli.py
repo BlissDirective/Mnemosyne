@@ -15,6 +15,8 @@ Claude Code SessionStart hook).
     python -m mnemosyne.cli resolve <id> confirmed|refuted|mixed [--note "..."]
     python -m mnemosyne.cli reputation
     python -m mnemosyne.cli curate [--json]           # librarian work list
+    python -m mnemosyne.cli replay --out DIR [--as-of 2026-10-01]
+    python -m mnemosyne.cli verify-journal             # hash-chain check
     python -m mnemosyne.cli propose --id <id> | --text "..." [--target canon]
     python -m mnemosyne.cli promote <id> | reject <id> --reason "..."
 
@@ -57,6 +59,8 @@ def main(argv=None) -> int:
                    help="also show superseded duplicates and expired world_facts")
     q.add_argument("--scope", nargs="*", default=[],
                    help="rings to search (default: canon + yours + your teams; 'all')")
+    q.add_argument("--as-of", default=None,
+                   help="ISO date/timestamp: what did we believe then? (journal time)")
 
     u = sub.add_parser("update", help="edit a memory in place (preserves id/links/history)")
     u.add_argument("id")
@@ -113,6 +117,12 @@ def main(argv=None) -> int:
     rs.add_argument("--note", default=None)
 
     sub.add_parser("reputation", help="writer reputations (Brier-calibrated)")
+
+    rp = sub.add_parser("replay", help="rebuild the notes from the journal into a new dir")
+    rp.add_argument("--out", required=True, help="empty directory to write into")
+    rp.add_argument("--as-of", default=None, help="stop at this ISO date/timestamp")
+
+    sub.add_parser("verify-journal", help="check the journal's hash chain")
 
     cu = sub.add_parser("curate", help="the librarian's work list (tier >= 2)")
     cu.add_argument("--json", action="store_true", help="machine-readable output")
@@ -172,7 +182,7 @@ def _dispatch(engine: MemoryEngine, args) -> None:
     elif args.cmd == "recall":
         hits = engine.recall(args.query, k=args.k, types=args.types or None,
                              include_superseded=args.include_superseded,
-                             scope=args.scope or None)
+                             scope=args.scope or None, as_of=args.as_of)
         if not hits:
             print("(no matches)")
         for h in hits:
@@ -207,6 +217,13 @@ def _dispatch(engine: MemoryEngine, args) -> None:
     elif args.cmd == "resolve":
         mem = engine.resolve(args.id, args.outcome, note=args.note)
         print(f"resolved {mem.id} as {args.outcome}; confidence now {mem.confidence}")
+    elif args.cmd == "replay":
+        print(json.dumps(engine.replay(args.out, as_of=args.as_of), indent=2))
+    elif args.cmd == "verify-journal":
+        result = engine.verify_journal()
+        print(json.dumps(result, indent=2))
+        if not result["ok"]:
+            raise ValueError(f"journal verification FAILED: {result['error']}")
     elif args.cmd == "curate":
         work = engine.curate(max_items=args.max_items)
         if args.json:

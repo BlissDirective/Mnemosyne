@@ -71,7 +71,7 @@ mnemosyne/
 │   ├── rings.py        ring access policy (private / team / proposed / canon)
 │   ├── reputation.py   Brier-calibrated writer reputation
 │   ├── librarian.py    the curation cycle (judge-driven; see LIBRARIAN.md)
-│   ├── journal.py      append-only audit journal (journal/events.jsonl)
+│   ├── journal.py      hash-chained event journal: replay, verify
 │   ├── gateway.py      JSON/HTTP adapter for non-MCP agents
 │   └── cli.py          same operations for humans, sync hooks, and session hooks
 ├── tests/test_pipeline.py      offline suite: core engine
@@ -80,6 +80,7 @@ mnemosyne/
 ├── tests/test_business_types.py  decisions/commitments/policies, relations, contradictions
 ├── tests/test_calibration.py   outcome resolution, reputation, bounded ranking prior
 ├── tests/test_librarian.py     work list, full curation cycle, digests
+├── tests/test_event_sourcing.py  hash chain, replay round trip, as-of recall
 ├── tests/live_stdio_check.py   real MCP client <-> server round trip
 ├── config.example.toml
 ├── pyproject.toml
@@ -406,6 +407,54 @@ itself in its private ring cannot move canon.
 
 ---
 
+## The journal: a tamper-evident system of record
+
+Every mutation is appended to the journal *before* the note is written.
+`notes/` is the materialized current state of the journal, and `journal/` is
+canonical and syncs with it:
+
+```
+journal/events-2026-10.jsonl    one shard per UTC month
+journal/events.jsonl            pre-v0.9 history, read first
+```
+
+Each event records `ts, writer, op, memory_id, content_hash, meta_hash` plus
+the memory's full `state` after the change, and is **hash-chained**: its
+`hash` covers its content and the previous event's hash. Editing, deleting, or
+reordering any past line breaks the chain at that line:
+
+```bash
+mnemosyne verify-journal          # {"ok": true, "events": 812, "head": "9f3c…"}
+```
+
+To catch cut-off history as well, record the `head` hash somewhere else,
+which your Git history already does.
+
+**Replay.** `mnemosyne replay --out DIR [--as-of 2026-10-01]` rebuilds the
+notes from the journal into a new directory, byte-for-byte identical to
+`notes/` (this is tested). Edits made outside the engine, such as a hand edit
+or a `git pull`, are journaled on the next `sync` as `external` events, so the
+record stays complete.
+
+**As-of recall: "what did we believe when we decided X?"**
+
+```bash
+mnemosyne recall "Acme pricing" --as-of 2026-09-10
+```
+
+`memory_recall` with `as_of` searches a read-only snapshot of the memory
+exactly as the journal had it at that moment, built once and cached under
+`.index/asof/`. The query is **bitemporal**: journal time decides what was
+*known*, and each fact's `valid_from`/`valid_to` decides what was *true* on
+that date. Nothing can be silently rewritten, only visibly appended. That
+closes the last gap in the poisoning defense.
+
+One writer process per store (the HTTP server) keeps the chain linear. Two
+machines writing the same journal and merging through Git would fork it, and
+`verify-journal` would say so.
+
+---
+
 ## Many writers: identity, HTTP transport, audit journal
 
 With more than one agent writing, *who wrote this* matters more than anything
@@ -449,10 +498,8 @@ curl -s localhost:8788/remember -H "Authorization: Bearer $MNEMOSYNE_TOKEN_GROK_
 
 Routes: `POST /remember`, `POST /recall`, `POST /update`, `GET /health`.
 
-**The journal.** `journal/events.jsonl` is canonical and syncs with `notes/`.
-Each line is `{ts, writer, op, memory_id, content_hash, meta_hash, state}`
-for every remember, update, forget, reflect edit, and counter flush. Replaying
-it reproduces the notes; `mnemosyne journal -n 20` shows the latest events.
+**The journal** is the system of record (next section). `mnemosyne journal -n 20`
+shows the latest events.
 
 ---
 

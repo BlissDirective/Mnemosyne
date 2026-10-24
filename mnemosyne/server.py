@@ -158,6 +158,10 @@ class RecallInput(BaseModel):
                              description="Rings to search. Empty = canon + your private ring + "
                                          "your teams. 'all' = every ring you may read. "
                                          "Reviewers can pass ['proposed'].")
+    as_of: Optional[str] = Field(default=None,
+                                 description="ISO date or timestamp: recall what the organization "
+                                             "believed at that moment (from the journal), with "
+                                             "fact validity judged at that date. Read-only.")
     digests: Optional[bool] = Field(default=None,
                                     description="Weekly librarian digests first? Default: only "
                                                 "for broad queries (no entities, large k). "
@@ -381,7 +385,7 @@ def memory_recall(params: RecallInput) -> str:
             params.query, k=params.k,
             types=params.types or None, entities=params.entities or None,
             include_superseded=params.include_superseded, writer=caller(),
-            scope=params.scope or None, digests=params.digests)
+            scope=params.scope or None, digests=params.digests, as_of=params.as_of)
         return _format_hits(hits)
     except Exception as e:
         return f"Error during recall: {type(e).__name__}: {e}"
