@@ -69,6 +69,7 @@ mnemosyne/
 │   ├── server.py       FastMCP/MCPServer: the memory_* tools (mcp 1.x & 2.x), stdio + HTTP
 │   ├── auth.py         writer identity, bearer-token resolution
 │   ├── rings.py        ring access policy (private / team / proposed / canon)
+│   ├── reputation.py   Brier-calibrated writer reputation
 │   ├── journal.py      append-only audit journal (journal/events.jsonl)
 │   ├── gateway.py      JSON/HTTP adapter for non-MCP agents
 │   └── cli.py          same operations for humans, sync hooks, and session hooks
@@ -76,6 +77,7 @@ mnemosyne/
 ├── tests/test_identity.py      identity, HTTP auth, journal, hammer tests
 ├── tests/test_rings.py         rings, quarantine, promotion workflow
 ├── tests/test_business_types.py  decisions/commitments/policies, relations, contradictions
+├── tests/test_calibration.py   outcome resolution, reputation, bounded ranking prior
 ├── tests/live_stdio_check.py   real MCP client <-> server round trip
 ├── config.example.toml
 ├── pyproject.toml
@@ -257,6 +259,36 @@ Notes that matter:
   problem can never block a session from starting.
 - Cloud sessions don't read your local `~/.claude/settings.json`; this hook is
   for Claude Code running on your machine.
+
+---
+
+## Calibration: confidence that tracks the truth
+
+Corroboration and usage raise confidence, but a business needs confidence that
+tracks *what turned out to be true*. Resolve a `hypothesis` (or `decision`)
+when the outcome is known:
+
+```bash
+mnemosyne resolve <id> confirmed --note "Q3 retention +8pts"   # or refuted / mixed
+mnemosyne reputation
+```
+
+- **confirmed**: confidence rises to at least 0.90. Reflect's corroboration is
+  capped at 0.85, so repeated assertion can never outrank a verified outcome.
+- **refuted**: the memory is retired (`valid_to` = today, tag `refuted`) and
+  drops out of default recall, but it is never deleted. The history is the lesson.
+- **mixed**: confidence moves halfway toward 0.5.
+
+The author's confidence at resolution time is scored as a forecast (Brier).
+Each writer's **reputation** is 1 minus their smoothed mean Brier score (0.75
+means no track record). It is derived from the resolved memories themselves,
+written to `notes/canon/_writers/<writer>.md` for the owner to read, and
+mirrored in the index. In ranking it scales a memory's confidence by
+×0.8–1.2, and confidence carries a small weight in the final score: enough to
+order near-ties by track record, never enough to outrank a more relevant
+memory. Resolvers need tier ≥ 2 and can't grade their own memories. `prime`
+lists hypotheses past `review_by` under **[awaiting resolution]**, and the
+reputation numbers tell you when a tier-1 agent has earned tier 2.
 
 ---
 

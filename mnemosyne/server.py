@@ -15,6 +15,7 @@ Code) can persist and retrieve memory across sessions:
     memory_promote    reviewer: move a proposal into canon / a team ring
     memory_reject     reviewer: send a proposal back with a reason
     memory_relate     typed edges: supports / contradicts / supersedes / evidence_for
+    memory_resolve    record a hypothesis/decision outcome; updates writer reputation
 
 Rings (see rings.py): private:<writer> | team:<name> | proposed | canon.
 Low-trust writers' shared writes are quarantined into `proposed`.
@@ -194,6 +195,15 @@ class RelateInput(BaseModel):
     note: Optional[str] = Field(default=None, max_length=500,
                                 description="Why (e.g. how the contradiction was judged).")
     remove: bool = Field(default=False, description="Remove this edge instead of adding it.")
+
+
+class ResolveInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    id: str = Field(..., min_length=3, description="The hypothesis or decision memory id.")
+    outcome: str = Field(..., description="confirmed | refuted | mixed")
+    note: Optional[str] = Field(default=None, max_length=1000,
+                                description="Evidence for the outcome (what happened).")
 
 
 class ProposeInput(BaseModel):
@@ -414,6 +424,28 @@ def memory_relate(params: RelateInput) -> str:
                           indent=2)
     except Exception as e:
         return f"Error relating memories: {type(e).__name__}: {e}"
+
+
+@mcp.tool(
+    name="memory_resolve",
+    annotations={"title": "Resolve outcome", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def memory_resolve(params: ResolveInput) -> str:
+    """Record how a hypothesis (or decision) turned out — calibration against
+    reality. confirmed raises confidence above anything corroboration can
+    reach; refuted retires the memory from default recall (kept for audit);
+    mixed pulls confidence toward 0.5. The author's confidence at this moment
+    is scored as a forecast (Brier) and their reputation updated. Needs tier
+    >= 2; you cannot grade your own memory. Logged in the journal."""
+    try:
+        mem = engine().resolve(params.id, params.outcome, note=params.note, writer=caller())
+        rep = engine().reputations().get(mem.writer, {})
+        return json.dumps({"status": "ok", "id": mem.id, "resolution": mem.resolution,
+                           "confidence": mem.confidence,
+                           "author_reputation": {mem.writer: rep}}, indent=2)
+    except Exception as e:
+        return f"Error resolving memory: {type(e).__name__}: {e}"
 
 
 @mcp.tool(

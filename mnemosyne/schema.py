@@ -109,6 +109,9 @@ class Memory:
     # typed edges to other memories: [{rel, id, note?}], rel in RELATION_TYPES.
     # Canonical (frontmatter), so they sync and survive index rebuilds.
     relations: List[Dict[str, str]] = field(default_factory=list)
+    # outcome calibration (v0.7): set once by memory_resolve —
+    # {outcome: confirmed|refuted|mixed, by, at, forecast, note?}
+    resolution: Optional[Dict[str, Any]] = None
 
     # ---- convenience -----------------------------------------------------
     @property
@@ -147,6 +150,7 @@ class Memory:
                 "owner_agent": self.owner_agent,
                 "review_by": self.review_by,
                 "relations": sorted(json.dumps(r, sort_keys=True) for r in self.relations),
+                "resolution": self.resolution,
             },
             sort_keys=True,
         )
@@ -158,6 +162,16 @@ class Memory:
             return False
         today = (today_iso or utcnow_iso())[:10]
         return str(self.valid_to)[:10] < today
+
+    @property
+    def refuted(self) -> bool:
+        return bool(self.resolution and self.resolution.get("outcome") == "refuted")
+
+    def is_retired(self, today_iso: Optional[str] = None) -> bool:
+        """Out of default recall: past its valid_to, or refuted by outcome
+        (refutation retires a belief at once; it is never deleted — the
+        history is the lesson)."""
+        return self.refuted or self.is_expired(today_iso)
 
     def touch(self) -> None:
         self.updated = utcnow_iso()
@@ -172,7 +186,7 @@ class Memory:
                 d.pop(k)
         for k in ("valid_from", "valid_to", "duplicate_of", "archive_ref", "last_recalled",
                   "proposed_by", "proposed_target", "proposed_from", "promoted_by",
-                  "promoted_at", "due", "owner_agent", "review_by"):
+                  "promoted_at", "due", "owner_agent", "review_by", "resolution"):
             if d[k] is None:
                 d.pop(k)
         if not d.get("recall_count"):

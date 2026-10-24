@@ -26,6 +26,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
+from . import reputation as reputation_mod
 from . import rings
 from .auth import Identity, identity_for
 from .config import TIER_OWNER, TIER_SENIOR, Config, load_config
@@ -76,10 +77,13 @@ class MemoryEngine:
 
     # ---- lifecycle -------------------------------------------------------
     def sync(self, force: bool = False) -> Dict[str, int]:
-        """Reconcile the derived index with the canonical notes."""
+        """Reconcile the derived index with the canonical notes (and rebuild
+        the derived writer reputations from the resolved memories)."""
         with self._lock:
             self.flush_access()
-            return reindex(self.store, self.index, self.provider, force=force)
+            result = reindex(self.store, self.index, self.provider, force=force)
+            self._rebuild_reputations()
+            return result
 
     def close(self) -> None:
         with self._lock:
@@ -347,7 +351,8 @@ class MemoryEngine:
             hits = self.retriever.recall(
                 query, k=k or self.cfg.recall_k, types=types, entities=entities,
                 include_superseded=include_superseded, rings=allowed,
-                superseded=superseded, contested=contested)
+                superseded=superseded, contested=contested,
+                prior=self._rank_prior())
             if record_access and hits:
                 self._record_access([h.memory.id for h in hits])
             return hits
@@ -376,6 +381,98 @@ class MemoryEngine:
                            dry_run=dry_run, persist=persist,
                            contradiction_band=(self.cfg.contradiction_low,
                                                self.cfg.contradiction_high))
+
+    # ---- outcome calibration & reputation ------------------------------------
+    RESOLVABLE = (MemoryType.HYPOTHESIS, MemoryType.DECISION)
+    CONFIRMED_FLOOR = 0.90   # above consolidate.REINFORCE_CAP, on purpose
+
+    def resolve(self, mem_id: str, outcome: str, note: Optional[str] = None,
+                writer: Optional[str] = None) -> Memory:
+        """Record how a hypothesis (or decision) turned out. confirmed ->
+        confidence up (to at least 0.90, above anything corroboration can
+        reach); refuted -> retired (valid_to = today, tag `refuted`) but kept
+        for the audit trail; mixed -> confidence pulled toward 0.5. The
+        author's confidence at this moment is scored as a forecast and their
+        reputation is recomputed. Resolvers need tier >= 2 and write access to
+        the memory, and may not grade their own memory (the owner excepted)."""
+        outcome = (outcome or "").strip().lower()
+        if outcome not in reputation_mod.OUTCOMES:
+            raise ValueError("outcome must be one of: confirmed, refuted, mixed")
+        ident = self.identity(writer)
+        with self._lock:
+            mem = self.store.read_by_id(mem_id)
+            if mem is None:
+                raise LookupError(f"memory {mem_id} not found")
+            if mem.type not in self.RESOLVABLE:
+                raise ValueError(f"only hypothesis or decision memories can be resolved; "
+                                 f"{mem_id} is a {mem.type.value}")
+            if mem.ring == rings.PROPOSED:
+                raise ValueError(f"{mem_id} is still a proposal; promote or reject it first")
+            if mem.resolution:
+                raise ValueError(f"{mem_id} was already resolved as "
+                                 f"{mem.resolution['outcome']} by {mem.resolution['by']}")
+            if ident.tier < TIER_SENIOR:
+                raise PermissionError(f"{ident.writer} (tier {ident.tier}) cannot resolve "
+                                      "outcomes; that needs tier >= 2.")
+            if ident.writer == mem.writer and ident.tier < TIER_OWNER:
+                raise PermissionError(f"{ident.writer} wrote {mem_id} and cannot grade it; "
+                                      "another senior writer or the owner must resolve it.")
+            rings.check_can_modify(ident, mem)
+
+            forecast = round(float(mem.confidence), 3)
+            mem.resolution = {"outcome": outcome, "by": ident.writer, "at": utcnow_iso(),
+                              "forecast": forecast}
+            if note and note.strip():
+                mem.resolution["note"] = note.strip()
+            if outcome == "confirmed":
+                mem.confidence = round(min(0.99, max(forecast + 0.15, self.CONFIRMED_FLOOR)), 3)
+            elif outcome == "refuted":
+                mem.valid_to = date.today().isoformat()
+                mem.confidence = round(min(forecast, 0.1), 3)
+            else:
+                mem.confidence = round((forecast + 0.5) / 2, 3)
+            if outcome not in mem.tags:
+                mem.tags.append(outcome)
+            mem.touch()
+            self._commit("resolve", ident.writer, mem, reembed=False)
+            self._rebuild_reputations()
+            return mem
+
+    def reputations(self) -> Dict[str, Dict[str, float]]:
+        with self._lock:
+            return self.index.reputations()
+
+    def _rebuild_reputations(self) -> None:
+        """Recompute every writer's reputation from the resolved memories,
+        mirror it into the index, and (re)write notes/canon/_writers/*.md only
+        where the content changed. Derived, so it can always be rebuilt."""
+        reps = reputation_mod.compute(self.store.iter_memories())
+        self.index.set_reputations({w: r.to_json() for w, r in reps.items()})
+        out_dir = self.cfg.notes_dir / "canon" / "_writers"
+        for w, r in reps.items():
+            path = out_dir / f"{w}.md"
+            text = reputation_mod.render_markdown(r)
+            if not path.exists() or path.read_text(encoding="utf-8") != text:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+
+    # Weight of the confidence term in ranking. RRF scores are compressed
+    # (rank 1 vs rank 2 in one strategy is ~1.6% apart; first in all three
+    # strategies is often only ~2% ahead), so this must stay small: at 0.06
+    # the best vs worst writer at equal confidence differ by ~1.7% — enough to
+    # break near-ties, never enough to beat a clearly more relevant memory.
+    CONFIDENCE_WEIGHT = 0.06
+
+    def _rank_prior(self):
+        """Confidence term for ranking, with writer reputation as a bounded
+        (x0.8-1.2) prior on confidence: effective = confidence x multiplier.
+        Neutral at confidence 0.7 with no track record."""
+        mults = {w: r["multiplier"] for w, r in self.index.reputations().items()}
+
+        def prior(m: Memory) -> float:
+            conf = max(0.0, min(1.0, m.confidence * mults.get(m.writer, 1.0)))
+            return 1.0 + self.CONFIDENCE_WEIGHT * (conf - 0.7)
+        return prior
 
     # ---- typed relations & contradictions ----------------------------------
     def relate(self, src_id: str, rel: str, dst_id: str, note: Optional[str] = None,
@@ -435,7 +532,7 @@ class MemoryEngine:
 
     @staticmethod
     def _live(m: Memory) -> bool:
-        return not m.duplicate_of and not m.is_expired()
+        return not m.duplicate_of and not m.is_retired()
 
     def is_verified_policy(self, m: Memory) -> bool:
         """A policy only counts as a standing instruction if it sits in canon
@@ -538,7 +635,7 @@ class MemoryEngine:
             mems = []
             for mid in self.index.top_for_priming(k * 2, rings=scope):
                 m = self.store.read_by_id(mid)
-                if m and not m.duplicate_of and not m.is_expired():
+                if m and not m.duplicate_of and not m.is_retired():
                     mems.append(m)
                 if len(mems) >= k:
                     break
@@ -573,6 +670,18 @@ class MemoryEngine:
                          "(check before acting):")
             for m in policies[:8]:
                 lines.append(f"- {_clip(m.text)} (id={m.id})")
+                shown.add(m.id)
+        # hypotheses past review_by and still unresolved
+        stale = [m for m in (self.store.read_by_id(mid) for mid, _ in
+                             self.index.ids_by_type_dated("hypothesis", "review_by",
+                                                          today.isoformat(), rings=scope))
+                 if m and m.resolution is None and not m.is_retired()]
+        if stale:
+            lines.append("[awaiting resolution] hypotheses past their review_by "
+                         "(memory_resolve them):")
+            for m in stale[:8]:
+                lines.append(f"- review_by {m.review_by[:10]} · by {m.writer} · "
+                             f"{_clip(m.text)} (id={m.id})")
                 shown.add(m.id)
         pending = s.get("by_ring", {}).get(rings.PROPOSED, 0)
         if pending and ident.tier >= TIER_SENIOR:
@@ -611,6 +720,7 @@ class MemoryEngine:
                     if m != self.provider.name)
         s["needs_reembed"] = stale
         s["access_pending_flush"] = self._pending_total
+        s["reputations"] = self.index.reputations()
         return s
 
 
@@ -621,7 +731,7 @@ def _clip(text: str, n: int = 200) -> str:
 
 def _open_commitment(m: Memory) -> bool:
     """A commitment is closed once retired (valid_to passed) or tagged done."""
-    return (not m.is_expired()
+    return (not m.is_retired()
             and not any(t.lower() in ("done", "closed", "cancelled") for t in m.tags))
 
 

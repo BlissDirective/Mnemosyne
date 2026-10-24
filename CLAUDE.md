@@ -64,6 +64,10 @@ Follow this whenever the `memory_*` MCP tools are connected (see README →
   the corrected `text`. Reviewers: work the queue (`memory_recall
   scope=["proposed"]`, then `memory_promote` / `memory_reject` with a reason)
   and never promote your own proposals.
+- **Close the loop on hypotheses.** When reality answers one (yours or
+  anyone's, but never grade your own), call `memory_resolve` with
+  `confirmed` / `refuted` / `mixed` and a note with the evidence. `prime` lists
+  overdue ones under [awaiting resolution].
 - **Respect policies and contested flags.** Recall shows owner-approved
   policies in a separate POLICIES section; check them before acting. A memory
   marked **⚠ contested** has a live contradiction: don't act on it until it is
@@ -136,6 +140,15 @@ mirrored in the index's `relations` table (edges from `proposed` are inert).
 `rings.check_type_write` makes policies tier-3-only; `engine.is_verified_policy`
 decides what renders as a policy. `reflect` reports contradiction candidates
 and never resolves them.
+
+**Calibration (v0.7):** `memory_resolve` sets `resolution: {outcome, by,
+at, forecast, note}`. `reputation.py` derives per-writer Brier reputations
+from those fields; the engine mirrors them into the index and writes
+`notes/canon/_writers/*.md` (store iteration skips `_`-prefixed dirs).
+Ranking applies `engine._rank_prior`, a small confidence term
+(`CONFIDENCE_WEIGHT`) with reputation bounded at ×0.8–1.2. Keep it small: RRF
+scores are compressed. Corroboration is capped at
+`consolidate.REINFORCE_CAP` (0.85), below the confirmed floor (0.90).
 
 **Setup & tests:**
 ```bash

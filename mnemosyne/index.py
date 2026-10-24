@@ -84,6 +84,15 @@ CREATE TABLE IF NOT EXISTS relations (
     PRIMARY KEY (src, rel, dst)
 );
 CREATE INDEX IF NOT EXISTS idx_rel_dst ON relations(dst);
+
+-- writer reputation, derived from resolved memories (see reputation.py)
+CREATE TABLE IF NOT EXISTS writer_reputation (
+    writer     TEXT PRIMARY KEY,
+    resolved   INTEGER NOT NULL,
+    brier      REAL NOT NULL,
+    reputation REAL NOT NULL,
+    multiplier REAL NOT NULL
+);
 """
 
 # columns added since 0.1.0 — patched in on open so an old index keeps working
@@ -393,6 +402,24 @@ class MemoryIndex:
                     ORDER BY m.{column}, m.id""",
                 (type_, until, *ring_args)).fetchall()
         return [(r["id"], r["d"]) for r in rows]
+
+    def set_reputations(self, reps: Dict[str, Dict[str, float]]) -> None:
+        """Replace the reputation mirror wholesale (it is derived)."""
+        with self._lock:
+            self.db.execute("DELETE FROM writer_reputation")
+            self.db.executemany(
+                "INSERT INTO writer_reputation (writer, resolved, brier, reputation, "
+                "multiplier) VALUES (?,?,?,?,?)",
+                [(w, r["resolved"], r["brier"], r["reputation"], r["multiplier"])
+                 for w, r in reps.items()])
+            self.db.commit()
+
+    def reputations(self) -> Dict[str, Dict[str, float]]:
+        with self._lock:
+            rows = self.db.execute("SELECT * FROM writer_reputation ORDER BY writer").fetchall()
+        return {r["writer"]: {"resolved": r["resolved"], "brier": r["brier"],
+                              "reputation": r["reputation"], "multiplier": r["multiplier"]}
+                for r in rows}
 
     def known_rings(self) -> List[str]:
         with self._lock:

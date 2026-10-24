@@ -48,6 +48,10 @@ from .store import MarkdownStore
 from .index import MemoryIndex
 
 _SIM_BLOCK = 512  # rows per block when computing pairwise similarities
+# Corroboration may raise confidence only this far. Resolving a hypothesis as
+# confirmed (memory_resolve) goes higher, so repeated assertion can never
+# outrank a verified outcome.
+REINFORCE_CAP = 0.85
 
 
 @dataclass
@@ -187,8 +191,9 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
         surv = store.read_by_id(survivor_id)
         if surv is None:
             continue
-        boost = min(0.99, surv.confidence + 0.05 * (len(members) - 1))
-        surv.confidence = round(boost, 3)
+        if surv.resolution is None and surv.confidence < REINFORCE_CAP:
+            surv.confidence = round(min(REINFORCE_CAP,
+                                        surv.confidence + 0.05 * (len(members) - 1)), 3)
         for dup_id in cluster_ids[1:]:
             if dup_id not in surv.links:
                 surv.links.append(dup_id)
@@ -212,8 +217,9 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
                 continue
             if counts[i] >= 1:
                 m = store.read_by_id(mid)
-                if m and m.confidence < 0.95:
-                    m.confidence = round(min(0.95, m.confidence + 0.02 * int(counts[i])), 3)
+                if m and m.resolution is None and m.confidence < REINFORCE_CAP:
+                    m.confidence = round(min(REINFORCE_CAP,
+                                             m.confidence + 0.02 * int(counts[i])), 3)
                     persist(m)
                     report.reinforced.append(mid)
 
@@ -228,7 +234,8 @@ def reflect(store: MarkdownStore, index: MemoryIndex,
         cutoff_iso = cutoff.replace(microsecond=0).isoformat()
         for i in range(n):
             m = store.read_by_id(ids[i])
-            if m is None or m.links or m.duplicate_of or m.confidence <= 0.2:
+            if (m is None or m.links or m.duplicate_of or m.resolution is not None
+                    or m.confidence <= 0.2):
                 continue
             last_activity = max(m.updated or "", m.last_recalled or "")
             if last_activity < cutoff_iso:

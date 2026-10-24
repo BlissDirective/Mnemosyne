@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .schema import Memory
 from .embeddings import EmbeddingProvider
@@ -92,12 +92,15 @@ class Retriever:
                include_superseded: bool = False,
                rings: Optional[Sequence[str]] = None,
                superseded: Optional[Set[str]] = None,
-               contested: Optional[Mapping[str, List[str]]] = None) -> List[Hit]:
+               contested: Optional[Mapping[str, List[str]]] = None,
+               prior: Optional[Callable[[Memory], float]] = None) -> List[Hit]:
         """`rings` restricts every strategy to those rings (None = no ring
         filter; the engine always passes the caller's resolved scope).
         `superseded` ids (targets of a live `supersedes` relation) are hidden
         like duplicates; `contested` maps id -> the ids it is contested with,
-        and is attached to each hit so nobody acts on it unknowingly."""
+        and is attached to each hit so nobody acts on it unknowingly.
+        `prior(memory)` is a bounded multiplier on each fused score (the
+        engine's confidence term, nudged by writer reputation)."""
         superseded = superseded or set()
         contested = contested or {}
         ck = self.candidate_k
@@ -126,16 +129,21 @@ class Retriever:
         if recency_on:
             ranked["recency"] = self.index.recent(min(ck, 15), types=types, rings=rings)
 
-        # over-fetch so post-fusion filtering can still fill k results
-        pool = k if include_superseded else max(k * 3, k + 8)
+        # over-fetch so post-fusion filtering and re-weighting can still fill k
+        pool = max(k * 3, k + 8)
         fused = _rrf_merge(ranked, k=pool, rrf_k=self.rrf_k,
                            weights={"recency": self.recency_weight})
 
-        hits: List[Hit] = []
+        cands: List[Tuple[Memory, float, List[str]]] = []
         for mid, score, strategies in fused:
             mem = self.store.read_by_id(mid)
             if mem is None:
                 continue
+            cands.append((mem, score * (prior(mem) if prior else 1.0), strategies))
+        cands.sort(key=lambda c: -c[1])
+
+        hits: List[Hit] = []
+        for mem, score, strategies in cands:
             if rings is not None and mem.ring not in rings:
                 continue  # index lagging the notes: the canonical ring decides
             if not include_superseded:
@@ -143,7 +151,7 @@ class Retriever:
                     continue
                 if mem.id in superseded:  # a reviewed memory supersedes it
                     continue
-                if mem.is_expired():      # world_fact past its valid_to
+                if mem.is_retired():      # past its valid_to, or refuted
                     continue
             hits.append(Hit(memory=mem, score=score, strategies=strategies,
                             contested_with=list(contested.get(mem.id, []))))

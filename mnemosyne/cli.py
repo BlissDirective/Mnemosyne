@@ -12,6 +12,8 @@ Claude Code SessionStart hook).
     python -m mnemosyne.cli journal [-n 20]
     python -m mnemosyne.cli queue                      # proposals awaiting review
     python -m mnemosyne.cli relate <src> contradicts <dst> [--note "..."]
+    python -m mnemosyne.cli resolve <id> confirmed|refuted|mixed [--note "..."]
+    python -m mnemosyne.cli reputation
     python -m mnemosyne.cli propose --id <id> | --text "..." [--target canon]
     python -m mnemosyne.cli promote <id> | reject <id> --reason "..."
 
@@ -104,6 +106,13 @@ def main(argv=None) -> int:
 
     sub.add_parser("queue", help="list proposals awaiting review (oldest first)")
 
+    rs = sub.add_parser("resolve", help="record a hypothesis/decision outcome")
+    rs.add_argument("id")
+    rs.add_argument("outcome", choices=["confirmed", "refuted", "mixed"])
+    rs.add_argument("--note", default=None)
+
+    sub.add_parser("reputation", help="writer reputations (Brier-calibrated)")
+
     rl = sub.add_parser("relate", help="add a typed edge between two memories")
     rl.add_argument("src")
     rl.add_argument("rel", help="supports | contradicts | supersedes | evidence_for")
@@ -190,6 +199,16 @@ def _dispatch(engine: MemoryEngine, args) -> None:
     elif args.cmd == "reject":
         mem = engine.reject(args.id, args.reason)
         print(f"rejected {mem.id} -> {mem.ring}")
+    elif args.cmd == "resolve":
+        mem = engine.resolve(args.id, args.outcome, note=args.note)
+        print(f"resolved {mem.id} as {args.outcome}; confidence now {mem.confidence}")
+    elif args.cmd == "reputation":
+        reps = engine.reputations()
+        if not reps:
+            print("(no resolved hypotheses yet)")
+        for w, r in sorted(reps.items(), key=lambda kv: -kv[1]["reputation"]):
+            print(f"{w:<20} reputation={r['reputation']:.3f} brier={r['brier']:.3f} "
+                  f"resolved={r['resolved']} ranking x{r['multiplier']:.2f}")
     elif args.cmd == "relate":
         mem = engine.relate(args.src, args.rel, args.dst, note=args.note, remove=args.remove)
         print(f"{mem.id} relations: {json.dumps(mem.relations)}")
