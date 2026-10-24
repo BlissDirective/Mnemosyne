@@ -14,6 +14,7 @@ Claude Code SessionStart hook).
     python -m mnemosyne.cli relate <src> contradicts <dst> [--note "..."]
     python -m mnemosyne.cli resolve <id> confirmed|refuted|mixed [--note "..."]
     python -m mnemosyne.cli reputation
+    python -m mnemosyne.cli curate [--json]           # librarian work list
     python -m mnemosyne.cli propose --id <id> | --text "..." [--target canon]
     python -m mnemosyne.cli promote <id> | reject <id> --reason "..."
 
@@ -113,6 +114,10 @@ def main(argv=None) -> int:
 
     sub.add_parser("reputation", help="writer reputations (Brier-calibrated)")
 
+    cu = sub.add_parser("curate", help="the librarian's work list (tier >= 2)")
+    cu.add_argument("--json", action="store_true", help="machine-readable output")
+    cu.add_argument("--max-items", type=int, default=20)
+
     rl = sub.add_parser("relate", help="add a typed edge between two memories")
     rl.add_argument("src")
     rl.add_argument("rel", help="supports | contradicts | supersedes | evidence_for")
@@ -202,6 +207,12 @@ def _dispatch(engine: MemoryEngine, args) -> None:
     elif args.cmd == "resolve":
         mem = engine.resolve(args.id, args.outcome, note=args.note)
         print(f"resolved {mem.id} as {args.outcome}; confidence now {mem.confidence}")
+    elif args.cmd == "curate":
+        work = engine.curate(max_items=args.max_items)
+        if args.json:
+            print(json.dumps(work, indent=2, default=str))
+        else:
+            print(_render_worklist(work))
     elif args.cmd == "reputation":
         reps = engine.reputations()
         if not reps:
@@ -222,6 +233,30 @@ def _dispatch(engine: MemoryEngine, args) -> None:
         events = list(engine.journal.events())
         for ev in events[-args.n:] if args.n > 0 else events:
             print(f"{ev['ts']}  {ev['writer']:<16} {ev['op']:<10} {ev.get('memory_id') or ''}")
+
+
+
+def _render_worklist(w) -> str:
+    q = w["proposed_queue"]
+    lines = [f"# Librarian work list — {w['week']}", "",
+             f"duplicate clusters: {len(w['duplicate_clusters'])}",
+             f"contested pairs:    {len(w['contested'])}",
+             f"review queue:       {q['depth']}",
+             f"hypotheses overdue: {len(w['hypotheses_awaiting_resolution'])}",
+             f"commitments overdue:{len(w['commitments_overdue'])}",
+             f"digest {w['digest']['tag']}: "
+             + (f"exists ({w['digest']['existing_id']})" if w["digest"]["existing_id"]
+                else "not written yet")]
+    for c in w["duplicate_clusters"]:
+        lines += ["", f"## merge into {c['survivor']}"] + [
+            f"- {m['id']} [{m['ring']}] {m['text']}" for m in c["members"]]
+    for c in w["contested"]:
+        lines += ["", f"## contested ({c['similarity']}, {', '.join(c['shared_entities'])})",
+                  f"- {c['a']}: {c['a_text']}", f"- {c['b']}: {c['b_text']}"]
+    for p in q["oldest"]:
+        lines.append(f"\n## proposal {p['id']} by {p['proposed_by']} -> {p['target']} "
+                     f"({p['age_days']}d)\n- {p['text']}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

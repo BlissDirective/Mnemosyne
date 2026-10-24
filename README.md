@@ -70,6 +70,7 @@ mnemosyne/
 │   ├── auth.py         writer identity, bearer-token resolution
 │   ├── rings.py        ring access policy (private / team / proposed / canon)
 │   ├── reputation.py   Brier-calibrated writer reputation
+│   ├── librarian.py    the curation cycle (judge-driven; see LIBRARIAN.md)
 │   ├── journal.py      append-only audit journal (journal/events.jsonl)
 │   ├── gateway.py      JSON/HTTP adapter for non-MCP agents
 │   └── cli.py          same operations for humans, sync hooks, and session hooks
@@ -78,6 +79,7 @@ mnemosyne/
 ├── tests/test_rings.py         rings, quarantine, promotion workflow
 ├── tests/test_business_types.py  decisions/commitments/policies, relations, contradictions
 ├── tests/test_calibration.py   outcome resolution, reputation, bounded ranking prior
+├── tests/test_librarian.py     work list, full curation cycle, digests
 ├── tests/live_stdio_check.py   real MCP client <-> server round trip
 ├── config.example.toml
 ├── pyproject.toml
@@ -259,6 +261,37 @@ Notes that matter:
   problem can never block a session from starting.
 - Cloud sessions don't read your local `~/.claude/settings.json`; this hook is
   for Claude Code running on your machine.
+
+---
+
+## The librarian: curation as a job
+
+A scheduled Claude Code session connects as writer `librarian` (tier 2) and
+runs the cycle in [`LIBRARIAN.md`](LIBRARIAN.md) every week:
+
+1. **Merge** duplicate clusters (update the survivor, forget the rest).
+2. **Adjudicate** contested pairs. When one side is clearly right, the
+   librarian *proposes* a resolution (a `decision` with a `supersedes` edge)
+   for the owner to sign off. When it can't tell, it records a `contradicts`
+   edge so recall flags both. It never decides on its own.
+3. **Work the review queue**: promote clean facts, reject noise with a
+   reason. It leaves policies, its own proposals, and money matters to the
+   owner.
+4. **Write the weekly digest**: a canon memory tagged `digest:<ISO-week>`.
+
+Discovery is deterministic and free. `mnemosyne curate` (or the
+`memory_curate` tool) prints the whole work list, so the session spends its
+tokens on judgment. The same loop is available in code as
+`mnemosyne.librarian.run_cycle(engine, judge)` for any LLM harness.
+
+**Tiered recall.** Broad queries (no entities, `k ≥ 10`) return the digests
+first, then raw memories. Pass `digests=false` to skip them or `digests=true`
+to force them.
+
+```bash
+MNEMOSYNE_WRITER=librarian mnemosyne curate          # human-readable work list
+MNEMOSYNE_WRITER=librarian mnemosyne curate --json   # for the session
+```
 
 ---
 

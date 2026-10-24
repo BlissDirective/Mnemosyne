@@ -28,7 +28,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -269,7 +269,8 @@ class MemoryIndex:
     # ---- read path: strategies ------------------------------------------
     def semantic(self, query_vec: np.ndarray, k: int,
                  types: Optional[Sequence[str]] = None,
-                 rings: Optional[Sequence[str]] = None) -> List[Tuple[str, float]]:
+                 rings: Optional[Sequence[str]] = None,
+                 only: Optional[Set[str]] = None) -> List[Tuple[str, float]]:
         self._ensure_matrix()
         if self._matrix is None or self._matrix.shape[0] == 0:
             return []
@@ -292,17 +293,22 @@ class MemoryIndex:
                 continue
             if allow_rings is not None and row_of.get(mid, ("", ""))[1] not in allow_rings:
                 continue
+            if only is not None and mid not in only:
+                continue
             results.append((mid, float(sims[idx])))
             if len(results) >= k:
                 break
         return results
 
     def keyword(self, query: str, k: int,
-                rings: Optional[Sequence[str]] = None) -> List[Tuple[str, float]]:
+                rings: Optional[Sequence[str]] = None,
+                only: Optional[Set[str]] = None) -> List[Tuple[str, float]]:
         match = _fts_query(query)
         if not match:
             return []
         ring_sql, ring_args = _ring_filter("m", rings)
+        only_sql, only_args = _id_filter("m", only)
+        ring_sql, ring_args = ring_sql + " " + only_sql, ring_args + only_args
         try:
             with self._lock:
                 rows = self.db.execute(
@@ -317,12 +323,15 @@ class MemoryIndex:
         return [(r["id"], -float(r["score"])) for r in rows]
 
     def graph(self, entities: Sequence[str], k: int,
-              rings: Optional[Sequence[str]] = None) -> List[Tuple[str, float]]:
+              rings: Optional[Sequence[str]] = None,
+              only: Optional[Set[str]] = None) -> List[Tuple[str, float]]:
         ents = [e.strip().lower() for e in entities if e.strip()]
         if not ents:
             return []
         placeholders = ",".join("?" * len(ents))
         ring_sql, ring_args = _ring_filter("m", rings)
+        only_sql, only_args = _id_filter("m", only)
+        ring_sql, ring_args = ring_sql + " " + only_sql, ring_args + only_args
         with self._lock:
             rows = self.db.execute(
                 f"""SELECT e.memory_id AS memory_id, COUNT(*) AS hits FROM mem_entities e
@@ -421,6 +430,22 @@ class MemoryIndex:
                               "reputation": r["reputation"], "multiplier": r["multiplier"]}
                 for r in rows}
 
+    def ids_with_tag_prefix(self, prefix: str,
+                            rings: Optional[Sequence[str]] = None) -> List[Tuple[str, List[str]]]:
+        """(id, tags) for memories carrying a tag that starts with `prefix`."""
+        ring_sql, ring_args = _ring_filter("m", rings)
+        like = '%"' + prefix.replace("%", "").replace("_", "\\_") + '%'
+        with self._lock:
+            rows = self.db.execute(
+                f"SELECT m.id AS id, m.tags AS tags FROM memories m "
+                f"WHERE m.tags LIKE ? ESCAPE '\\' {ring_sql}", (like, *ring_args)).fetchall()
+        out = []
+        for r in rows:
+            tags = json.loads(r["tags"] or "[]")
+            if any(t.startswith(prefix) for t in tags):
+                out.append((r["id"], tags))
+        return out
+
     def known_rings(self) -> List[str]:
         with self._lock:
             rows = self.db.execute(
@@ -475,6 +500,15 @@ def _ring_filter(alias: str, rings: Optional[Sequence[str]]) -> Tuple[str, tuple
         return "AND 0", ()
     return (f"AND COALESCE({alias}.ring, 'canon') IN ({','.join('?' * len(rings))})",
             tuple(rings))
+
+
+def _id_filter(alias: str, ids: Optional[Set[str]]) -> Tuple[str, tuple]:
+    if ids is None:
+        return "", ()
+    if not ids:
+        return "AND 0", ()
+    ids = sorted(ids)
+    return f"AND {alias}.id IN ({','.join('?' * len(ids))})", tuple(ids)
 
 
 def _fts_query(query: str) -> str:

@@ -48,6 +48,9 @@ class Config:
     recency_weight: float = 0.3       # recency's RRF weight when it runs at all
                                       # (it only runs when the query has temporal
                                       # cues — see retrieval.py)
+    broad_k: int = 10                 # a query with no entities and k >= this is
+                                      # "broad": librarian digests are recalled first
+    digest_k: int = 3                 # max digests placed ahead of raw memories
 
     # access counters
     counter_flush_every: int = 10     # write recall_count/last_recalled back to the
@@ -127,6 +130,8 @@ def load_config(root: Optional[str] = None) -> Config:
     cfg.candidate_k = int(ret.get("candidate_k", cfg.candidate_k))
     cfg.rrf_k = int(ret.get("rrf_k", cfg.rrf_k))
     cfg.recency_weight = float(ret.get("recency_weight", cfg.recency_weight))
+    cfg.broad_k = int(ret.get("broad_k", cfg.broad_k))
+    cfg.digest_k = int(ret.get("digest_k", cfg.digest_k))
 
     acc = data.get("access", {})
     cfg.counter_flush_every = max(1, int(acc.get("flush_every", cfg.counter_flush_every)))

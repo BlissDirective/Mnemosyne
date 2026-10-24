@@ -40,6 +40,12 @@ from .journal import Journal
 
 # writer id used for engine-internal maintenance (counter flushes)
 SYSTEM_WRITER = "system"
+DIGEST_TAG = "digest:"   # librarian digests are tagged digest:<ISO-week>
+
+
+def iso_week(d: date) -> str:
+    y, w, _ = d.isocalendar()
+    return f"{y}-W{w:02d}"
 
 
 class MemoryEngine:
@@ -180,6 +186,9 @@ class MemoryEngine:
                 mem = Memory(text=text.strip(),
                              type=MemoryType.coerce(fields.pop("type", None) or "semantic"),
                              **{k: v for k, v in fields.items() if v is not None})
+            mem.relations = [self._check_relation(r.get("rel", ""), r.get("id", ""),
+                                                  r.get("note"), src_id=mem.id)
+                             for r in (fields.get("relations") or [])]
             mem.writer = ident.writer
             mem.ring = rings.PROPOSED
             mem.proposed_by = ident.writer
@@ -341,18 +350,37 @@ class MemoryEngine:
                include_superseded: bool = False,
                record_access: bool = True,
                writer: Optional[str] = None,
-               scope: Optional[Sequence[str]] = None) -> List[Hit]:
+               scope: Optional[Sequence[str]] = None,
+               digests: Optional[bool] = None) -> List[Hit]:
         """Recall within `scope` (default: canon + the caller's private ring +
-        their teams; 'all' = every ring the caller may read)."""
+        their teams; 'all' = every ring the caller may read).
+
+        Tiered: for broad queries (no entities given or detected, and k >=
+        `broad_k`) — or when digests=True — the librarian's weekly digests
+        (tag `digest:<ISO-week>`) come first, then raw memories fill the rest.
+        digests=False always goes straight to raw memories."""
         ident = self.identity(writer)
+        k = k or self.cfg.recall_k
         with self._lock:
             allowed = rings.resolve_scope(ident, scope, self.index.known_rings())
             superseded, contested = self._relation_state(allowed)
-            hits = self.retriever.recall(
-                query, k=k or self.cfg.recall_k, types=types, entities=entities,
-                include_superseded=include_superseded, rings=allowed,
-                superseded=superseded, contested=contested,
-                prior=self._rank_prior())
+            kw = dict(types=types, entities=entities,
+                      include_superseded=include_superseded, rings=allowed,
+                      superseded=superseded, contested=contested,
+                      prior=self._rank_prior())
+            hits: List[Hit] = []
+            if digests or (digests is None and self._is_broad(query, entities, k)):
+                digest_ids = {mid for mid, _ in
+                              self.index.ids_with_tag_prefix(DIGEST_TAG, rings=allowed)}
+                if digest_ids:
+                    hits = self.retriever.recall(query, k=min(self.cfg.digest_k, k),
+                                                 only=digest_ids, **kw)
+                    for h in hits:
+                        h.strategies = ["digest"] + h.strategies
+            seen = {h.memory.id for h in hits}
+            if len(hits) < k:
+                rest = self.retriever.recall(query, k=k + len(seen), **kw)
+                hits += [h for h in rest if h.memory.id not in seen][: k - len(hits)]
             if record_access and hits:
                 self._record_access([h.memory.id for h in hits])
             return hits
@@ -381,6 +409,77 @@ class MemoryEngine:
                            dry_run=dry_run, persist=persist,
                            contradiction_band=(self.cfg.contradiction_low,
                                                self.cfg.contradiction_high))
+
+    def _is_broad(self, query: str, entities: Optional[Sequence[str]], k: int) -> bool:
+        from .retrieval import _guess_entities
+        return not entities and not _guess_entities(query) and k >= self.cfg.broad_k
+
+    # ---- the librarian's work list ------------------------------------------
+    def activity(self, since: str) -> Dict[str, List[Dict[str, object]]]:
+        """What changed since `since` (ISO timestamp), from the journal —
+        the raw material for a digest. Lists of {op, writer, id, text}."""
+        out: Dict[str, List[Dict[str, object]]] = {}
+        for ev in self.journal.events():
+            if ev["ts"] < since or ev["op"] in ("access",):
+                continue
+            state = ev.get("state") or {}
+            out.setdefault(ev["op"], []).append({
+                "ts": ev["ts"], "writer": ev["writer"], "id": ev.get("memory_id"),
+                "type": state.get("type"), "ring": state.get("ring"),
+                "text": _clip(state.get("text", ""), 160),
+                **({"outcome": state["resolution"]["outcome"]}
+                   if ev["op"] == "resolve" and state.get("resolution") else {})})
+        return out
+
+    def curate(self, writer: Optional[str] = None, max_items: int = 20) -> Dict[str, object]:
+        """Deterministic discovery for a librarian run (no LLM needed): every
+        piece of curation work, so the librarian session spends its tokens on
+        judgment. Needs tier >= 2 (it reads across rings via reflect)."""
+        ident = self.identity(writer)
+        report = self.reflect(dry_run=True, writer=ident.writer)
+        today = date.today()
+        week = iso_week(today)
+        with self._lock:
+            def brief(m: Memory) -> Dict[str, object]:
+                return {"id": m.id, "type": m.type.value, "ring": m.ring,
+                        "writer": m.writer, "confidence": m.confidence,
+                        "text": _clip(m.text, 300)}
+
+            clusters = []
+            for ids in report.duplicate_clusters[:max_items]:
+                mems = [m for m in (self.store.read_by_id(i) for i in ids) if m]
+                clusters.append({"survivor": ids[0], "members": [brief(m) for m in mems]})
+            queue = []
+            for m in self.pending_proposals()[:max_items]:
+                age = (today - date.fromisoformat(m.created[:10])).days
+                queue.append({**brief(m), "proposed_by": m.proposed_by,
+                              "target": m.proposed_target, "age_days": age,
+                              "relations": m.relations})
+            all_rings = list(self.index.known_rings())
+            overdue_h = [brief(m) | {"review_by": m.review_by} for m in
+                         (self.store.read_by_id(i) for i, _ in self.index.ids_by_type_dated(
+                             "hypothesis", "review_by", today.isoformat(), rings=all_rings))
+                         if m and m.resolution is None and not m.is_retired()][:max_items]
+            overdue_c = [brief(m) | {"due": m.due, "owner_agent": m.owner_agent} for m in
+                         (self.store.read_by_id(i) for i, _ in self.index.ids_by_type_dated(
+                             "commitment", "due", today.isoformat(), rings=all_rings))
+                         if m and _open_commitment(m)][:max_items]
+            digest = [mid for mid, tags in self.index.ids_with_tag_prefix(f"{DIGEST_TAG}{week}")
+                      if f"{DIGEST_TAG}{week}" in tags]
+            since = (today - timedelta(days=7)).isoformat()
+            return {
+                "week": week,
+                "duplicate_clusters": clusters,
+                "contested": report.contested[:max_items],
+                "proposed_queue": {"depth": len(self.index.ids_in_ring(rings.PROPOSED)),
+                                   "oldest": queue},
+                "hypotheses_awaiting_resolution": overdue_h,
+                "commitments_overdue": overdue_c,
+                "digest": {"tag": f"{DIGEST_TAG}{week}", "existing_id": digest[0] if digest else None},
+                "activity_last_7_days": self.activity(since),
+                "stats": {k: v for k, v in self.index.stats().items()
+                          if k in ("total", "by_ring", "superseded")},
+            }
 
     # ---- outcome calibration & reputation ------------------------------------
     RESOLVABLE = (MemoryType.HYPOTHESIS, MemoryType.DECISION)

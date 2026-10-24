@@ -111,14 +111,16 @@ class Retriever:
                rings: Optional[Sequence[str]] = None,
                superseded: Optional[Set[str]] = None,
                contested: Optional[Mapping[str, List[str]]] = None,
-               prior: Optional[Callable[[Memory], float]] = None) -> List[Hit]:
+               prior: Optional[Callable[[Memory], float]] = None,
+               only: Optional[Set[str]] = None) -> List[Hit]:
         """`rings` restricts every strategy to those rings (None = no ring
         filter; the engine always passes the caller's resolved scope).
         `superseded` ids (targets of a live `supersedes` relation) are hidden
         like duplicates; `contested` maps id -> the ids it is contested with,
         and is attached to each hit so nobody acts on it unknowingly.
         `prior(memory)` is a bounded multiplier on each fused score (the
-        engine's confidence term, nudged by writer reputation)."""
+        engine's confidence term, nudged by writer reputation). `only`
+        restricts every strategy to those ids (used for digest-first recall)."""
         superseded = superseded or set()
         contested = contested or {}
         ck = self.candidate_k
@@ -128,23 +130,23 @@ class Retriever:
         #    (Voyage) embed them as queries, not documents
         try:
             qv = self.provider.embed_query(query)
-            sem = self.index.semantic(qv, ck, types=types, rings=rings)
+            sem = self.index.semantic(qv, ck, types=types, rings=rings, only=only)
             ranked["semantic"] = sem
         except Exception:
             ranked["semantic"] = []  # e.g. no API key -> degrade to keyword/graph
 
         # 2) keyword / BM25
-        ranked["keyword"] = self.index.keyword(query, ck, rings=rings)
+        ranked["keyword"] = self.index.keyword(query, ck, rings=rings, only=only)
 
         # 3) graph expansion (entities the caller flagged, or words in the query)
         ents = list(entities) if entities else _guess_entities(query)
         if ents:
-            ranked["graph"] = self.index.graph(ents, ck, rings=rings)
+            ranked["graph"] = self.index.graph(ents, ck, rings=rings, only=only)
 
         # 4) temporal / recency prior — gated on temporal cues (or explicit
         #    use_recency=True), and down-weighted in fusion either way
         recency_on = _has_temporal_cue(query) if use_recency is None else use_recency
-        if recency_on:
+        if recency_on and only is None:
             ranked["recency"] = self.index.recent(min(ck, 15), types=types, rings=rings)
 
         # over-fetch so post-fusion filtering and re-weighting can still fill k

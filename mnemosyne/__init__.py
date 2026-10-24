@@ -21,7 +21,7 @@ Layers:
                forget / stats / reindex
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 from .schema import Memory, MemoryType  # noqa: E402,F401
 

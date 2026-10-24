@@ -152,6 +152,13 @@ relevant memories fuse to equal scores. Keep the weight below a one-rank RRF
 gap (about 0.5%), or reputation starts overriding relevance. Corroboration is capped at
 `consolidate.REINFORCE_CAP` (0.85), below the confirmed floor (0.90).
 
+**Librarian (v0.8):** `engine.curate()` is the deterministic work list (it
+changes nothing). `librarian.run_cycle(engine, judge)` is the reference loop
+and `LIBRARIAN.md` is the runbook for the scheduled session. Digests are canon
+`semantic` memories tagged `digest:<ISO-week>`. `engine.recall` puts them
+first for broad queries (`_is_broad`: no entities, `k >= broad_k`) through
+the retriever's `only=` id filter.
+
 **Setup & tests:**
 ```bash
 python -m venv .venv && source .venv/bin/activate

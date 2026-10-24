@@ -24,6 +24,8 @@ candidate_k    = 40    # candidates each strategy contributes before fusion
 rrf_k          = 60    # Reciprocal Rank Fusion constant (higher = flatter weighting)
 recency_weight = 0.3   # recency's fusion weight; it only runs at all when the
                        # query has temporal cues ("recent", "last week", ...)
+broad_k        = 10    # no-entity queries with k >= this recall librarian digests first
+digest_k       = 3     # at most this many digests ahead of raw memories
 
 [access]
 flush_every = 10       # recall hits to batch before writing recall_count /
