@@ -60,17 +60,26 @@ class MemoryEngine:
         self.cfg = config or load_config()
         self.as_of = as_of
         self.cfg.ensure_dirs()
-        self.store = MarkdownStore(self.cfg.notes_dir, self.cfg.archive_dir)
         self.provider: EmbeddingProvider = get_provider(
             self.cfg.provider, self.cfg.model, self.cfg.dim)
-        self.index = MemoryIndex(self.cfg.db_path)
+        backend_lock = None
+        if self.cfg.storage == "postgres" and as_of is None:
+            from .pg import open_backend
+            db, self.store, journal, self.index = open_backend(self.cfg)
+            backend_lock = db
+        elif self.cfg.storage in ("files", "postgres"):
+            self.store = MarkdownStore(self.cfg.notes_dir, self.cfg.archive_dir)
+            self.index = MemoryIndex(self.cfg.db_path)
+            journal = Journal(self.cfg.journal_dir)
+        else:
+            raise ValueError(f"unknown storage {self.cfg.storage!r}: use 'files' or 'postgres'")
+        self.journal = journal if as_of is None else _NoJournal()
         self.retriever = Retriever(
             self.store, self.index, self.provider,
             candidate_k=self.cfg.candidate_k, rrf_k=self.cfg.rrf_k,
             recency_weight=self.cfg.recency_weight)
-        self.journal = Journal(self.cfg.journal_dir) if as_of is None else _NoJournal()
         self._snapshots: Dict[str, "MemoryEngine"] = {}
-        self._lock = threading.RLock()
+        self._lock = _EngineLock(backend_lock)
         # pending access-counter write-backs: id -> (delta, last_recalled_ts)
         self._pending_access: Dict[str, List] = {}
         self._pending_total: int = 0
@@ -143,6 +152,34 @@ class MemoryEngine:
         return {"memories": len(states), "events": len(events), "as_of": until,
                 "out": str(out_dir)}
 
+    def export(self, out_dir: Path) -> Dict[str, object]:
+        """Walk away with everything: write this store in the file backend's
+        layout (Markdown notes by ring, reputation pages, verbatim archive,
+        journal shards) into an empty `out_dir`. The result verifies with the
+        same hash chain and opens as a normal file-backend store."""
+        out_dir = Path(out_dir)
+        result = self.replay(out_dir)
+        with self._lock:
+            jdir = out_dir / "journal"
+            if hasattr(self.journal, "export_shards"):
+                shards = self.journal.export_shards(jdir)
+            else:
+                jdir.mkdir(parents=True, exist_ok=True)
+                shards = []
+                for src in self.journal.shards():
+                    dst = jdir / src.name
+                    dst.write_bytes(src.read_bytes())
+                    shards.append(dst)
+            if hasattr(self.store, "archive_items"):
+                for ref, content in self.store.archive_items():
+                    target = out_dir / ref
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
+            elif self.cfg.archive_dir.exists():
+                shutil.copytree(self.cfg.archive_dir, out_dir / "archive", dirs_exist_ok=True)
+        result["journal_shards"] = [p.name for p in shards]
+        return result
+
     def verify_journal(self) -> Dict[str, object]:
         return self.journal.verify()
 
@@ -166,7 +203,7 @@ class MemoryEngine:
             store = MarkdownStore(root / "notes", root / "archive")
             for mem in states.values():
                 store.write(mem)
-        cfg = dataclasses.replace(self.cfg, root=root)
+        cfg = dataclasses.replace(self.cfg, root=root, storage="files")
         snap = MemoryEngine(cfg, as_of=until)
         snap.sync()
         marker.write_text(head)
@@ -761,7 +798,8 @@ class MemoryEngine:
         where the content changed. Derived, so it can always be rebuilt."""
         reps = reputation_mod.compute(self.store.iter_memories())
         self.index.set_reputations({w: r.to_json() for w, r in reps.items()})
-        _write_reputation_pages(self.cfg.notes_dir, reps)
+        if getattr(self.store, "supports_files", True):
+            _write_reputation_pages(self.cfg.notes_dir, reps)
 
     # Weight of the confidence term in ranking. RRF only sees ranks, and one
     # rank of difference in one strategy is worth just ~0.5% of a typical fused
@@ -880,6 +918,16 @@ class MemoryEngine:
         if not p.is_absolute():
             p = self.cfg.root / p
         return p if p.exists() else None
+
+    def read_archive(self, mem: Memory) -> Optional[str]:
+        """The verbatim source text behind a memory, on either backend."""
+        if not mem.archive_ref:
+            return None
+        reader = getattr(self.store, "read_archive", None)
+        if reader is not None:
+            return reader(mem.archive_ref)
+        path = self.resolve_archive(mem)
+        return path.read_text(encoding="utf-8") if path else None
 
     # ---- access counters ---------------------------------------------------
     def _record_access(self, mem_ids: Sequence[str]) -> None:
@@ -1083,6 +1131,39 @@ def _write_reputation_pages(notes_dir: Path, reps) -> None:
         if not path.exists() or path.read_text(encoding="utf-8") != text:
             out_dir.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
+
+
+class _EngineLock:
+    """The engine's re-entrant lock. With a Postgres backend, the outermost
+    acquisition also takes the workspace's advisory lock, so engine operations
+    are serialized per workspace across processes (replicas), not just
+    threads."""
+
+    def __init__(self, backend=None):
+        self._rlock = threading.RLock()
+        self._backend = backend
+        self._depth = 0
+
+    def __enter__(self):
+        self._rlock.acquire()
+        self._depth += 1
+        if self._depth == 1 and self._backend is not None:
+            try:
+                self._backend.acquire()
+            except BaseException:
+                self._depth -= 1
+                self._rlock.release()
+                raise
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._depth == 1 and self._backend is not None:
+                self._backend.release()
+        finally:
+            self._depth -= 1
+            self._rlock.release()
+        return False
 
 
 class _NoJournal:

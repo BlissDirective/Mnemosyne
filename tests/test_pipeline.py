@@ -5,6 +5,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from mnemosyne.config import Config
 from mnemosyne.engine import MemoryEngine
 from mnemosyne.schema import Memory, MemoryType
@@ -188,6 +190,7 @@ def test_embed_query_interface(tmp_path):
 # --------------------------------------------------------------------------- #
 # v0.2.0 fix #4 — archive_ref is relative and resolvable
 # --------------------------------------------------------------------------- #
+@pytest.mark.files_only
 def test_archive_ref_is_relative_and_resolvable(tmp_path):
     eng = make_engine(tmp_path)
     mem = eng.remember("Distilled fact.", type="semantic",
@@ -276,6 +279,7 @@ def test_update_metadata_only(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_update_text_reembeds_and_preserves_identity(tmp_path):
     eng = make_engine(tmp_path)
     mem = eng.remember("Alice works at Initech.", type="world_fact",

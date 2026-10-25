@@ -17,6 +17,9 @@ Claude Code SessionStart hook).
     python -m mnemosyne.cli curate [--json]           # librarian work list
     python -m mnemosyne.cli replay --out DIR [--as-of 2026-10-01]
     python -m mnemosyne.cli verify-journal             # hash-chain check
+    python -m mnemosyne.cli export --out DIR           # the whole store, file layout
+    python -m mnemosyne.cli import-log DECISION_LOG.md --kind decision [--dry-run]
+    python -m mnemosyne.cli eval evals/questions.jsonl [-k 5]   # recall quality
     python -m mnemosyne.cli decide "quote Acme $900" --query "Acme pricing"
     python -m mnemosyne.cli approve <id> --note "..."  # owner: clear for high stakes
     python -m mnemosyne.cli metrics [--since 2026-10-01] [--json]
@@ -127,6 +130,22 @@ def main(argv=None) -> int:
 
     sub.add_parser("verify-journal", help="check the journal's hash chain")
 
+    il = sub.add_parser("import-log", help="import a Markdown decision log or state file")
+    il.add_argument("path")
+    il.add_argument("--kind", choices=["decision", "state"], default="decision")
+    il.add_argument("--ring", default="canon")
+    il.add_argument("--source", default=None, help="default: import:<file name>")
+    il.add_argument("--dry-run", action="store_true", help="count, write nothing")
+
+    ev = sub.add_parser("eval", help="measure recall quality on a question set (JSONL: "
+                                     '{"q": ..., "expect": "substring of the right memory"})')
+    ev.add_argument("path")
+    ev.add_argument("-k", type=int, default=5)
+
+    ex = sub.add_parser("export", help="write the whole store (notes, archive, journal) "
+                                       "in the file layout to an empty directory")
+    ex.add_argument("--out", required=True)
+
     dc = sub.add_parser("decide", help="guardrail check before a high-stakes action")
     dc.add_argument("action")
     dc.add_argument("--query", default=None)
@@ -235,6 +254,22 @@ def _dispatch(engine: MemoryEngine, args) -> None:
         print(f"resolved {mem.id} as {args.outcome}; confidence now {mem.confidence}")
     elif args.cmd == "replay":
         print(json.dumps(engine.replay(args.out, as_of=args.as_of), indent=2))
+    elif args.cmd == "import-log":
+        from pathlib import Path
+        from .importers.decision_log import import_log
+        path = Path(args.path)
+        report = import_log(engine, path.read_text(encoding="utf-8"), kind=args.kind,
+                            writer=engine.cfg.writer, ring=args.ring,
+                            source=args.source or f"import:{path.name}",
+                            dry_run=args.dry_run)
+        print(json.dumps(report.to_json(), indent=2))
+    elif args.cmd == "eval":
+        from pathlib import Path
+        from .evaluate import evaluate, load_questions
+        result = evaluate(engine, load_questions(Path(args.path)), k=args.k)
+        print(json.dumps(result, indent=2))
+    elif args.cmd == "export":
+        print(json.dumps(engine.export(args.out), indent=2))
     elif args.cmd == "verify-journal":
         result = engine.verify_journal()
         print(json.dumps(result, indent=2))

@@ -158,8 +158,10 @@ class Retriever:
                            weights={"recency": self.recency_weight})
 
         cands: List[Tuple[Memory, float, List[str]]] = []
+        read_many = getattr(self.store, "read_many", None)
+        batch = read_many([mid for mid, _, _ in fused]) if read_many else None
         for mid, score, strategies in fused:
-            mem = self.store.read_by_id(mid)
+            mem = batch.get(mid) if batch is not None else self.store.read_by_id(mid)
             if mem is None:
                 continue
             cands.append((mem, score * (prior(mem) if prior else 1.0), strategies))

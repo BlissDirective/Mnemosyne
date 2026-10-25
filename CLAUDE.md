@@ -183,12 +183,23 @@ gate (verdicts `clear`, `cleared`, `advisory`, `blocked`; journaled as
 ignored by replay). `metrics.compute` derives the pilot metrics from the
 journal. `AGENTS.md` and `docs/PILOT.md` hold the operating docs.
 
+**Storage backends (v1.1):** `Config.storage` is `files` (default) or
+`postgres` (`pg.py`: `PgStore`, `PgJournal`, `PgIndex` implement the same
+interfaces as `MarkdownStore`, `Journal`, `MemoryIndex`). The engine picks the
+backend in `__init__`; nothing above it knows which one it got. Multi-tenancy
+is the `workspace` column. Cross-process safety comes from
+`engine._EngineLock`, which takes the workspace advisory lock at the outermost
+acquire (`tests/test_postgres.py` proves lost updates without it). Run the
+suite on both backends before merging.
+
 **Setup & tests:**
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 python -m pytest -q                   # offline, no API key
 python tests/live_stdio_check.py      # spawns the real server over stdio
+# the same suite on Postgres (+ pgvector):
+MNEMOSYNE_STORAGE=postgres MNEMOSYNE_TEST_DATABASE_URL=postgresql://… python -m pytest -q
 ```
 
 **Conventions (keep these true):**
@@ -241,6 +252,13 @@ python tests/live_stdio_check.py      # spawns the real server over stdio
 - The engine is serialized by one `RLock`; store writes are atomic
   (temp file + rename). Keep the hammer tests in `tests/test_identity.py` green.
 - Tokens live only in `MNEMOSYNE_TOKEN_<WRITER>` env vars, never in files.
+  The same goes for `MNEMOSYNE_DATABASE_URL` (`load_config` refuses it in
+  config.toml).
+- A new storage method goes on both implementations of its interface (file and
+  Postgres), and gets a test that runs on both backends.
+  Tests that inspect the file layout itself are marked `files_only`.
+- Ranking changes are measured with `mnemosyne eval`, not judged by eye, and
+  compared on both backends.
 - Access rules live in `rings.py` and nowhere else. A new operation that
   reads or writes memories must go through `rings.resolve_scope` /
   `write_decision` / `check_can_modify`. Fail closed: unknown writers are tier 0.
@@ -276,6 +294,9 @@ mnemosyne decide   "quote Acme $900" --ids <id> # guardrail check before acting
 mnemosyne approve  <id> --note "…"             # owner: clear for high stakes
 mnemosyne metrics                              # pilot dashboard
 mnemosyne curate                               # librarian work list
+mnemosyne export   --out DIR                   # whole store in the file layout
+mnemosyne import-log DECISION_LOG.md --kind decision
+mnemosyne eval     evals/questions.jsonl -k 5  # recall quality
 ```
 
 > Placement: keep this file at the repo root to guide work *on* Mnemosyne. To

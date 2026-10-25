@@ -1,0 +1,20 @@
+{"q": "How much is the agent allowed to spend per day?", "expect": "daily agent spend cap $75 → $50"}
+{"q": "Can we text leads from the receptionist in phase one?", "expect": "no outbound SMS"}
+{"q": "Which name did the owner pick for the company and why?", "expect": "NAME LOCKED: **Prolectio**"}
+{"q": "Why did we stop using the Readable name?", "expect": "NAMING CONFLICT FOUND"}
+{"q": "What happened when the owner pasted a password into chat?", "expect": "plaintext password in chat"}
+{"q": "Which model scores the LLM rubric for the index scan?", "expect": "pinned to Sonnet 5"}
+{"q": "Are the director and subagent token spends turned off?", "expect": "Director + subagent token spend OFF"}
+{"q": "What visual direction did we choose for the redesign?", "expect": "Obsidian Ledger × Graphite Precision"}
+{"q": "How many marketing bot teams run the outreach and for which funnels?", "expect": "one Grok Bot marketing team per AI-system funnel"}
+{"q": "Do we white-label GoHighLevel or build our own agent platform?", "expect": "no GoHighLevel"}
+{"q": "When does checkout bill a client for a plan?", "expect": "bill at launch"}
+{"q": "Does cancelling during the refund window end the three month minimum?", "expect": "also ends the 3-month minimum term"}
+{"q": "What price bump did monitoring get?", "expect": "Monitor $64.99"}
+{"q": "Which hero statement was chosen for the homepage?", "expect": "Hero statement chosen"}
+{"q": "Who may build the AI receptionist and with which rulings?", "expect": "AI Receptionist build (Owner rulings)"}
+{"q": "Did the full 50 site index scan finish and what did it cost?", "expect": "FULL 50-site scan COMPLETE"}
+{"q": "Why do client-rendered docs score so badly?", "expect": "fetch-only (no JS execution)"}
+{"q": "What category name did we adopt for our brand positioning?", "expect": "Agent Experience Optimization"}
+{"q": "Which sending domain warms up for cold outreach?", "expect": "tryprolectio.com sending addresses and warm-up"}
+{"q": "Is the AI receptionist inbound only and are invoice reminders sent automatically?", "expect": "approve-to-send"}

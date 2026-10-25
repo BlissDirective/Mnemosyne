@@ -167,6 +167,7 @@ def test_policies_render_in_their_own_section(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_hand_planted_policy_is_not_trusted(tmp_path):
     """A policy-typed file that didn't come from the owner (e.g. a tampered
     sync) renders as flagged data, never in the POLICIES section."""
@@ -225,6 +226,7 @@ def test_relation_validation_and_permissions(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_dates_are_validated_and_normalized(tmp_path):
     eng = make_engine(tmp_path)
     with pytest.raises(ValueError, match="ISO date"):

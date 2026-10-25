@@ -6,6 +6,8 @@ keyword + graph) is a rebuildable cache derived from it.
 
 Layers:
   store        canonical Markdown + YAML frontmatter, one directory per ring
+  pg           the same store, journal and index on Postgres + pgvector,
+               one workspace per tenant (storage = "postgres")
   journal      hash-chained event log: replay, as-of snapshots, verification
   embeddings   pluggable providers (dev / OpenAI / Voyage / local)
   index        SQLite (WAL, metadata + FTS5 + relations) + numpy vectors
@@ -20,7 +22,7 @@ Layers:
                (JSON/HTTP) and cli are thin surfaces over it
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .schema import Memory, MemoryType  # noqa: E402,F401
 

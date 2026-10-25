@@ -62,6 +62,7 @@ def busy_store(eng):
 # --------------------------------------------------------------------------- #
 # definition of done
 # --------------------------------------------------------------------------- #
+@pytest.mark.files_only
 def test_replay_round_trips_byte_for_byte(tmp_path):
     eng = make_engine(tmp_path / "store")
     busy_store(eng)
@@ -114,6 +115,7 @@ def test_as_of_recall_returns_belief_state_at_a_planted_moment(tmp_path, monkeyp
     eng.close()
 
 
+@pytest.mark.files_only
 def test_hash_chain_catches_a_tampered_line(tmp_path):
     eng = make_engine(tmp_path)
     busy_store(eng)
@@ -152,6 +154,7 @@ def test_hash_chain_catches_a_tampered_line(tmp_path):
 # --------------------------------------------------------------------------- #
 # completeness of the record
 # --------------------------------------------------------------------------- #
+@pytest.mark.files_only
 def test_out_of_band_edits_are_journaled_so_replay_stays_exact(tmp_path):
     eng = make_engine(tmp_path / "store")
     a, b, q, h = busy_store(eng)
@@ -170,6 +173,7 @@ def test_out_of_band_edits_are_journaled_so_replay_stays_exact(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_monthly_shards_and_legacy_anchor(tmp_path, monkeypatch):
     # a store from v0.4-v0.8 has an unchained journal/events.jsonl
     legacy_eng = make_engine(tmp_path)

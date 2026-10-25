@@ -50,6 +50,7 @@ def disk_state(eng: MemoryEngine):
 # --------------------------------------------------------------------------- #
 # 1.1 writer identity
 # --------------------------------------------------------------------------- #
+@pytest.mark.files_only
 def test_every_memory_carries_a_writer(tmp_path):
     eng = make_engine(tmp_path)
     a = eng.remember("Owner fact.")
@@ -290,6 +291,7 @@ def test_every_mutation_is_journaled_and_replays(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_journal_is_append_only(tmp_path):
     eng = make_engine(tmp_path)
     eng.remember("First.")

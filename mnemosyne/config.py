@@ -4,6 +4,7 @@ to use. Reads (in order of precedence) explicit args -> env vars -> config.toml
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -79,9 +80,30 @@ class Config:
         "payment", "contract", "pricing", "legal", "customer-commitment"])
     approval_hours: int = 24          # how long an owner approval (memory_approve) lasts
 
+    # storage backend: "files" (Markdown + SQLite on this machine) or
+    # "postgres" (one database, many workspaces; see pg.py). The connection
+    # string comes ONLY from the MNEMOSYNE_DATABASE_URL env var.
+    storage: str = field(default_factory=lambda: os.environ.get("MNEMOSYNE_STORAGE", "files"))
+    workspace: str = field(default_factory=lambda: os.environ.get("MNEMOSYNE_WORKSPACE", "default"))
+    pg_schema: str = field(default_factory=lambda: os.environ.get("MNEMOSYNE_PG_SCHEMA", "mnemosyne"))
+    exact_search_max: int = 20000     # below this many vectors per workspace, semantic
+                                      # search is exact; above, it uses the HNSW index
+    database_url: str = field(default_factory=lambda: os.environ.get("MNEMOSYNE_DATABASE_URL", ""),
+                              repr=False)
+
     # HTTP transport
     http_host: str = "127.0.0.1"
     http_port: int = 8787
+
+    def __post_init__(self) -> None:
+        self.resolve_workspace()
+
+    def resolve_workspace(self) -> None:
+        """workspace "@root" = one workspace per memory home (derived from the
+        root path) — handy for tests and for one-store-per-directory setups."""
+        if self.workspace == "@root":
+            digest = hashlib.sha256(str(Path(self.root).resolve()).encode()).hexdigest()
+            self.workspace = "ws_" + digest[:16]
 
     # ---- derived paths ---------------------------------------------------
     @property
@@ -157,6 +179,16 @@ def load_config(root: Optional[str] = None) -> Config:
     if "high_stakes_tags" in gr:
         cfg.high_stakes_tags = [str(t).strip().lower() for t in gr["high_stakes_tags"]]
     cfg.approval_hours = int(gr.get("approval_hours", cfg.approval_hours))
+
+    st = data.get("storage", {})
+    if "database_url" in st:
+        raise ValueError("[storage] database_url must not be in config.toml (it holds a "
+                         "password): set MNEMOSYNE_DATABASE_URL in the environment")
+    cfg.storage = os.environ.get("MNEMOSYNE_STORAGE", st.get("backend", cfg.storage))
+    cfg.workspace = os.environ.get("MNEMOSYNE_WORKSPACE", st.get("workspace", cfg.workspace))
+    cfg.pg_schema = os.environ.get("MNEMOSYNE_PG_SCHEMA", st.get("schema", cfg.pg_schema))
+    cfg.exact_search_max = int(st.get("exact_search_max", cfg.exact_search_max))
+    cfg.resolve_workspace()
 
     http = data.get("http", {})
     cfg.http_host = str(http.get("host", cfg.http_host))

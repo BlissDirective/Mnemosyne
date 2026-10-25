@@ -59,6 +59,14 @@ owner        = { tier = 3 }
 high_stakes_tags = ["payment", "contract", "pricing", "legal", "customer-commitment"]
 approval_hours   = 24      # how long an owner approval lasts
 
+[storage]
+# backend = "files"      # Markdown + SQLite on this machine (default)
+# backend = "postgres"   # one database, many workspaces (pip install "mnemosyne-memory[postgres]")
+# workspace = "default"  # tenant id inside the database ("@root" = derive from this directory)
+# schema = "mnemosyne"
+# exact_search_max = 20000
+# The connection string is NEVER put here: set MNEMOSYNE_DATABASE_URL.
+
 [http]
 # `mnemosyne-server --http` serves MCP (streamable HTTP) at http://host:port/mcp;
 # every request must carry `Authorization: Bearer <token>`.

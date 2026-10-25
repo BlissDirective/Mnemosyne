@@ -29,6 +29,7 @@ def hyp(eng, text, writer, confidence=0.7, **kw):
 # --------------------------------------------------------------------------- #
 # definition of done
 # --------------------------------------------------------------------------- #
+@pytest.mark.files_only
 def test_resolving_moves_writer_reputation(tmp_path):
     eng = make_engine(tmp_path)
     assert eng.reputations() == {}
@@ -104,6 +105,7 @@ def test_reputation_affects_ranking_boundedly(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_reputations_survive_reindex(tmp_path):
     eng = make_engine(tmp_path)
     h = hyp(eng, "Bundling support lifts ARPU.", "grok-good", 0.8)

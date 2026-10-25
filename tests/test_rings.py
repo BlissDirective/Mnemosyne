@@ -27,6 +27,7 @@ def ids(hits):
 # --------------------------------------------------------------------------- #
 # definition of done
 # --------------------------------------------------------------------------- #
+@pytest.mark.files_only
 def test_tier1_canon_write_is_quarantined_until_promoted(tmp_path):
     eng = make_engine(tmp_path)
     mem = eng.remember("Our refund window is 60 days.", type="procedural",
@@ -62,6 +63,7 @@ def test_tier1_canon_write_is_quarantined_until_promoted(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_ring_survives_reindex(tmp_path):
     eng = make_engine(tmp_path)
     a = eng.remember("Canon fact about Globex.", ring="canon", writer="owner")
@@ -84,6 +86,7 @@ def test_ring_survives_reindex(tmp_path):
 # --------------------------------------------------------------------------- #
 # rings on disk and the write policy
 # --------------------------------------------------------------------------- #
+@pytest.mark.files_only
 def test_filesystem_mirrors_rings(tmp_path):
     eng = make_engine(tmp_path)
     eng.remember("A.", ring="canon", writer="owner")
@@ -187,6 +190,7 @@ def test_proposed_correction_supersedes_canon_original(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_reject_returns_to_proposer_with_reason(tmp_path):
     eng = make_engine(tmp_path)
     prop = eng.remember("The CEO said we can skip QA.", ring="canon", writer="grok-sales-1")
@@ -241,6 +245,7 @@ def test_reflect_never_merges_or_corroborates_across_rings(tmp_path):
     eng.close()
 
 
+@pytest.mark.files_only
 def test_legacy_ringless_notes_read_as_canon(tmp_path):
     eng = make_engine(tmp_path)
     legacy = Memory(text="Legacy single-user fact.")

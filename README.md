@@ -78,6 +78,7 @@ mnemosyne/
 ├── mnemosyne/
 │   ├── schema.py       Memory + MemoryType, Markdown (de)serialization
 │   ├── store.py        canonical Markdown store (one directory per ring) + archive
+│   ├── pg.py           Postgres backend: store, journal, pgvector index, per workspace
 │   ├── embeddings.py   pluggable providers: dev / openai / voyage (+ your own)
 │   ├── index.py        SQLite + FTS5 + numpy vectors + entity graph + relations
 │   ├── retrieval.py    semantic + keyword + graph (+ gated recency), weighted RRF
@@ -90,6 +91,8 @@ mnemosyne/
 │   ├── librarian.py    the curation cycle (judge-driven; see LIBRARIAN.md)
 │   ├── guardrails.py   secrets screen, suspicion, high-stakes decision gate
 │   ├── metrics.py      pilot metrics from the journal
+│   ├── evaluate.py     recall-quality evaluation (hit@k, MRR)
+│   ├── importers/      decision-log / state-file importer
 │   ├── server.py       MCP server (stdio + authenticated HTTP), mcp 1.x & 2.x
 │   ├── gateway.py      JSON/HTTP adapter for agents that can't speak MCP
 │   └── cli.py          the same operations for humans, hooks, and cron
@@ -273,6 +276,73 @@ Notes that matter:
   problem can never block a session from starting.
 - Cloud sessions don't read your local `~/.claude/settings.json`; this hook is
   for Claude Code running on your machine.
+
+---
+
+## Storage: files on one machine, or Postgres for a team
+
+| | `files` (default) | `postgres` |
+|---|---|---|
+| Canonical store | Markdown under `notes/` + `journal/*.jsonl` | rows: `memories`, `journal` (same events, same hash chain) |
+| Index | one SQLite file in `.index/` | `idx` tables with **pgvector** (HNSW) + full-text search |
+| Writers | one process per store | many replicas per workspace (a per-workspace advisory lock keeps writes and the chain linear) |
+| Scale | about 50k memories per store | millions; many **workspaces** (tenants) in one database |
+| Best for | a person, a laptop, a few agents | an organization's agents, a SaaS with one workspace per client |
+
+```bash
+pip install "mnemosyne-memory[postgres]"
+export MNEMOSYNE_STORAGE=postgres
+export MNEMOSYNE_DATABASE_URL="postgresql://…"   # env only, never config.toml
+export MNEMOSYNE_WORKSPACE=acme                  # one workspace per tenant
+mnemosyne stats
+```
+
+- **Supabase works** (pgvector is built in). Use a *session* connection, either
+  direct or the session pooler on port 5432. Transaction pooling breaks advisory
+  locks. Tables live in their own schema (`mnemosyne`, or set
+  `MNEMOSYNE_PG_SCHEMA`), outside the REST-exposed `public` schema.
+- **The canonical/derived split still holds:** the `idx*` tables are rebuilt
+  from `memories` with `mnemosyne reindex --force`.
+- **You can still walk away:** `mnemosyne export --out DIR` writes the whole
+  workspace in the file layout (Markdown notes, reputation pages, archive,
+  journal shards). The exported journal verifies with the same hashes, and the
+  directory opens as a normal file-backend store.
+- **Semantic search** is exact (cosine over the workspace's rows) up to
+  `[storage] exact_search_max` (20k) vectors per workspace, then switches to
+  the HNSW index. On pgvector ≥ 0.8 it uses iterative scans, so filters don't
+  starve results.
+- The whole test suite runs on both backends:
+  `MNEMOSYNE_STORAGE=postgres MNEMOSYNE_TEST_DATABASE_URL=… pytest`.
+
+## Importing an existing decision log
+
+Agent-run businesses often start with "the filesystem is your memory": a
+decision log and a state file. Bring them in without losing a word:
+
+```bash
+MNEMOSYNE_WRITER=director mnemosyne import-log DECISION_LOG.md --kind decision
+MNEMOSYNE_WRITER=director mnemosyne import-log STATE.md --kind state
+```
+
+Each dated entry becomes one memory (`decision` or `episodic`), written to
+canon and dated with `valid_from`, with PR and request references as entities.
+The full raw entry is kept verbatim in the archive. The importer recognizes
+pipe rows (`date | decision | …`), dated `##` sections, and
+`- **Owner rulings (date):**` bullets. Re-running it skips entries already
+imported, and entries the secrets screen rejects are reported, not imported.
+
+## Measuring recall
+
+```bash
+mnemosyne eval evals/prolectio_decisions.jsonl -k 5
+# {"hit@1": 0.45, "hit@5": 0.65, "mrr": 0.525, "provider": "dev-hash-256", "misses": [...]}
+```
+
+A question set is JSONL (`{"q": …, "expect": "substring of the right
+memory"}`). Run it before and after changing the embedding model or the
+ranking. The figures above are for the offline `dev` embedder on a real
+214-entry decision log. Its misses are paraphrases, which a real embedding
+model closes.
 
 ---
 
