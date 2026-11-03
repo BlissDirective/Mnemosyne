@@ -252,6 +252,11 @@ MNEMOSYNE_STORAGE=postgres MNEMOSYNE_TEST_DATABASE_URL=postgresql://… python -
 - The engine is serialized by one `RLock`; store writes are atomic
   (temp file + rename). Keep the hammer tests in `tests/test_identity.py` green.
 - Tokens live only in `MNEMOSYNE_TOKEN_<WRITER>` env vars, never in files.
+  A writer may instead carry `token_sha256` (the hex digest, never the token)
+  in `[writers]`, so a runtime roster reload (`engine.reload_roster`, owner
+  only; `apply_roster_from_config` for SIGHUP) can add writers without a
+  restart. Reload builds the new roster fully, then swaps `cfg.writers` in one
+  assignment, and a bad file keeps the old roster.
   The same goes for `MNEMOSYNE_DATABASE_URL` (`load_config` refuses it in
   config.toml).
 - A new storage method goes on both implementations of its interface (file and
@@ -282,6 +287,7 @@ mnemosyne stats
 mnemosyne reindex  [--force]
 mnemosyne forget   <memory-id>
 mnemosyne prime    [topic]        # session-start context block (hook-safe)
+mnemosyne new-token <writer> --tier 1 --teams sales   # token + token_sha256 line
 mnemosyne remember "…" --ring canon            # quarantined below tier 2
 mnemosyne recall   "…" --scope all             # every ring you may read
 mnemosyne queue                                # proposals awaiting review

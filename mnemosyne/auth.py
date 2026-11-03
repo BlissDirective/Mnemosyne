@@ -11,12 +11,14 @@ Tokens live only in the environment, one per writer:
 (the writer id upper-cased, with every non-alphanumeric character turned into
 `_`). The roster of writers and their trust tiers is `[writers]` in
 config.toml. A token resolves to a writer only if that writer is on the roster
-and its env var holds exactly that token; anything else is rejected before any
-engine call.
+and its env var holds exactly that token (or the token's SHA-256 matches the
+writer's `token_sha256` in config.toml, which a runtime roster reload can
+add); anything else is rejected before any engine call.
 """
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import re
@@ -43,6 +45,13 @@ def token_env_name(writer: str) -> str:
     return "MNEMOSYNE_TOKEN_" + re.sub(r"[^A-Za-z0-9]", "_", writer).upper()
 
 
+def is_armed(cfg: Config, writer: str, environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Whether a rostered writer can authenticate: an env token or a digest."""
+    env = os.environ if environ is None else environ
+    spec = cfg.writers.get(writer)
+    return bool(env.get(token_env_name(writer)) or (spec and spec.token_sha256))
+
+
 def identity_for(cfg: Config, writer: str) -> Identity:
     """The identity a local (stdio/CLI) caller runs as. Unknown writers get
     tier 0 — fail closed for writes."""
@@ -58,10 +67,15 @@ def resolve_token(cfg: Config, token: Optional[str],
     if not token:
         return None
     env = os.environ if environ is None else environ
+    digest = hashlib.sha256(token.encode()).hexdigest().encode()
     match: Optional[str] = None
-    for writer in cfg.writers:
+    # snapshot: a concurrent roster reload swaps the dict, never mutates it
+    writers = cfg.writers
+    for writer, spec in writers.items():
         expected = env.get(token_env_name(writer))
         if expected and hmac.compare_digest(expected.encode(), token.encode()):
+            match = writer
+        if spec.token_sha256 and hmac.compare_digest(spec.token_sha256.encode(), digest):
             match = writer
     return identity_for(cfg, match) if match else None
 

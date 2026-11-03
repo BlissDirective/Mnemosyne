@@ -173,9 +173,36 @@ def main(argv=None) -> int:
     jr = sub.add_parser("journal", help="show the latest audit-journal events")
     jr.add_argument("-n", type=int, default=20, help="how many events (newest last)")
 
+    nt = sub.add_parser("new-token", help="mint a bearer token for a writer and print its "
+                                          "[writers] line (token_sha256) for config.toml")
+    nt.add_argument("writer")
+    nt.add_argument("--tier", type=int, default=1, choices=[0, 1, 2, 3])
+    nt.add_argument("--teams", default="", help="comma-separated team names")
+
     args = p.parse_args(argv)
 
     from .config import load_config
+
+    if args.cmd == "new-token":
+        # Needs no store: the token goes to stdout once, only its digest is kept.
+        import hashlib
+        import secrets
+        from .auth import valid_writer_id
+        if not valid_writer_id(args.writer):
+            print(f"error: invalid writer id {args.writer!r} (lowercase letters, digits, "
+                  "'_', '.', '-'; up to 64)", file=sys.stderr)
+            return 1
+        token = secrets.token_hex(32)
+        teams = [t.strip().lower() for t in args.teams.split(",") if t.strip()]
+        line = (f'"{args.writer}" = {{ tier = {args.tier}, '
+                + (f"teams = {json.dumps(teams)}, " if teams else "")
+                + f'token_sha256 = "{hashlib.sha256(token.encode()).hexdigest()}" }}')
+        print(json.dumps({"writer": args.writer, "token": token, "config_line": line},
+                         indent=2))
+        print("[mnemosyne] add config_line under [writers], then reload the roster "
+              "(SIGHUP or memory_reload_roster). The token is shown only now.",
+              file=sys.stderr)
+        return 0
 
     if args.cmd == "prime":
         # Hook-safe: never block a session on a memory error — print whatever we
