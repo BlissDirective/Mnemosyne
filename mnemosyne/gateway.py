@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, Optional
 
 from .auth import Identity, bearer_token, resolve_token
-from .engine import MemoryEngine
+from .engine import MemoryEngine, install_sighup_reload
 from .retrieval import Hit
 
 MAX_BODY = 1_000_000  # bytes
@@ -174,6 +174,7 @@ def main(argv: Optional[list] = None) -> None:
     args = p.parse_args(argv)
     eng = MemoryEngine(load_config(args.root))
     eng.sync()
+    install_sighup_reload(lambda: eng)
     srv = make_server(eng, args.host, args.port)
     print(f"[mnemosyne] gateway on http://{args.host}:{args.port}", file=sys.stderr)
     try:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,10 @@ TIER_UNTRUSTED, TIER_STANDARD, TIER_SENIOR, TIER_OWNER = 0, 1, 2, 3
 class WriterSpec:
     tier: int = TIER_STANDARD
     teams: List[str] = field(default_factory=list)   # team rings it belongs to
+    # Optional SHA-256 (hex) of the writer's bearer token. Lets a roster that is
+    # reloaded at runtime add a writer without restarting the process to set a
+    # new env var. The token itself is never stored, only its digest.
+    token_sha256: Optional[str] = None
 
 
 def _default_writers() -> Dict[str, WriterSpec]:
@@ -198,9 +203,27 @@ def load_config(root: Optional[str] = None) -> Config:
     return cfg
 
 
+def load_writers(root: Path) -> Dict[str, WriterSpec]:
+    """Re-read only `[writers]` from <root>/config.toml (for a runtime roster
+    reload). Raises if the file or the table is missing, or if any entry is
+    invalid, so a bad edit can never silently replace a working roster."""
+    toml_path = Path(root) / "config.toml"
+    if not toml_path.exists():
+        raise FileNotFoundError(f"no config.toml at {toml_path}; nothing to reload")
+    with open(toml_path, "rb") as f:
+        data = tomllib.load(f)
+    if "writers" not in data:
+        raise ValueError(f"{toml_path} has no [writers] table; nothing to reload")
+    return _parse_writers(data["writers"])
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 def _parse_writers(raw: Dict[str, Any]) -> Dict[str, WriterSpec]:
     """`[writers]` maps writer id -> `{ tier = N }` (or the shorthand `id = N`).
-    Tokens are never stored here; they live in MNEMOSYNE_TOKEN_<WRITER> env vars."""
+    Tokens are never stored here; they live in MNEMOSYNE_TOKEN_<WRITER> env vars.
+    A writer may instead carry `token_sha256`, the hex SHA-256 of its token."""
     out: Dict[str, WriterSpec] = {}
     for writer, spec in raw.items():
         if isinstance(spec, int):
@@ -213,5 +236,11 @@ def _parse_writers(raw: Dict[str, Any]) -> Dict[str, WriterSpec]:
         teams = spec.get("teams", [])
         if isinstance(teams, str):
             teams = [teams]
-        out[writer] = WriterSpec(tier=tier, teams=[str(t).strip().lower() for t in teams])
+        digest = spec.get("token_sha256")
+        if digest is not None:
+            digest = str(digest).strip().lower()
+            if not _SHA256_RE.match(digest):
+                raise ValueError(f"[writers] {writer}: token_sha256 must be 64 hex characters")
+        out[writer] = WriterSpec(tier=tier, teams=[str(t).strip().lower() for t in teams],
+                                 token_sha256=digest)
     return out

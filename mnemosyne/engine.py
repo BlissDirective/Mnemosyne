@@ -32,7 +32,7 @@ from . import guardrails
 from . import reputation as reputation_mod
 from . import rings
 from .auth import Identity, identity_for
-from .config import TIER_OWNER, TIER_SENIOR, Config, load_config
+from .config import TIER_OWNER, TIER_SENIOR, Config, load_config, load_writers
 from .schema import RELATION_TYPES, Memory, MemoryType, utcnow_iso
 from .store import MarkdownStore
 from .embeddings import get_provider, EmbeddingProvider
@@ -89,6 +89,32 @@ class MemoryEngine:
 
     def identity(self, writer: Optional[str] = None) -> Identity:
         return identity_for(self.cfg, self._writer(writer))
+
+    # ---- roster ------------------------------------------------------------
+    def reload_roster(self, writer: Optional[str] = None) -> Dict[str, object]:
+        """Owner only: re-read `[writers]` from config.toml without a restart,
+        so a platform can add, re-tier or remove agents at runtime. An invalid
+        or missing table raises and the current roster stays in force."""
+        ident = self.identity(writer)
+        if ident.tier < TIER_OWNER:
+            raise PermissionError(f"{ident.writer} (tier {ident.tier}) cannot reload the "
+                                  "roster: changing who may write is the owner's call (tier 3).")
+        with self._lock:
+            return self.apply_roster_from_config()
+
+    def apply_roster_from_config(self) -> Dict[str, object]:
+        """Load and swap in the roster (no permission check: for the operator's
+        SIGHUP). The new dict is built in full, then swapped in one assignment,
+        so a concurrent token lookup sees either the old roster or the new one."""
+        fresh = load_writers(self.cfg.root)
+        old = self.cfg.writers
+        self.cfg.writers = fresh
+        return {
+            "writers": sorted(fresh),
+            "added": sorted(set(fresh) - set(old)),
+            "removed": sorted(set(old) - set(fresh)),
+            "changed": sorted(w for w in set(fresh) & set(old) if fresh[w] != old[w]),
+        }
 
     def _commit(self, op: str, writer: str, mem: Memory, reembed: bool) -> None:
         """Journal first, then the canonical file, then the derived index."""
@@ -1179,3 +1205,26 @@ class _NoJournal:
 
     def verify(self):
         return {"ok": True, "events": 0, "legacy_events": 0, "head": None, "error": None}
+
+
+def install_sighup_reload(get_engine) -> bool:
+    """Make SIGHUP (the operator's signal, e.g. `docker kill -s HUP`) reload
+    the roster from config.toml, like the owner's memory_reload_roster tool.
+    `get_engine` is called at signal time. Errors keep the old roster and go to
+    stderr. Returns False where SIGHUP doesn't exist (Windows)."""
+    import json
+    import signal
+    import sys
+    if not hasattr(signal, "SIGHUP"):
+        return False
+
+    def _on_hup(signum, frame):
+        try:
+            res = get_engine().apply_roster_from_config()
+            print(f"[mnemosyne] roster reloaded: {json.dumps(res)}", file=sys.stderr)
+        except Exception as e:
+            print(f"[mnemosyne] roster reload failed, keeping the old one: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+
+    signal.signal(signal.SIGHUP, _on_hup)
+    return True

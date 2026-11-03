@@ -378,6 +378,24 @@ Each request must send `Authorization: Bearer <token>`; the token decides the
 writer, and an unknown or missing token gets `401` before anything touches the
 store. Keep it on localhost or behind a TLS proxy.
 
+**Adding writers at runtime.** A server that is already running can't see new
+env vars, so a writer can instead carry the SHA-256 of its token in the
+roster, and the roster can be reloaded without a restart:
+
+```bash
+mnemosyne new-token sales-bot --tier 1 --teams sales
+#   prints the token once, plus a config_line such as
+#   "sales-bot" = { tier = 1, teams = ["sales"], token_sha256 = "f32c…" }
+# add config_line under [writers] in config.toml, then either:
+kill -HUP <server pid>                 # or: docker kill -s HUP <container>
+# …or call memory_reload_roster as the owner (tier 3).
+```
+
+Only the digest is stored, never the token. Reload re-reads `[writers]` only.
+If the file is missing or invalid, the current roster stays in force and the
+error is reported. Removing a writer from the roster revokes its token at
+once. The JSON gateway reloads on SIGHUP too.
+
 **Agents that can't speak MCP** use the JSON gateway (same tokens, no logic of
 its own):
 
@@ -677,6 +695,8 @@ doesn't change.
 | `memory_curate` | the librarian's work list | tier ≥ 2 |
 | `memory_recall_for_decision` | guardrail verdicts before a high-stakes action | anyone |
 | `memory_approve` | clear a memory for high-stakes use (the human gate) | owner (tier 3) |
+| `memory_prime` | the session-start context block (`prime`), for harnesses that inject context themselves | anyone, within readable rings |
+| `memory_reload_roster` | re-read `[writers]` from config.toml without a restart (also on SIGHUP) | owner (tier 3) |
 
 ---
 
